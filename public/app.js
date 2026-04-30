@@ -5,6 +5,7 @@ const WORKER_URL = 'https://pisni.slovo-wiry.workers.dev';
 'use strict';
 
 let ws = null, role = null, playing = false, paused = false;
+let syncAudioEnabled = false; // чи хост увімкнув музику на всіх
 let lyrics = [], animFrame = null, roomId = null;
 let startTime = null;    // серверний ms старту
 let pauseTime = null;    // серверний ms паузи
@@ -249,24 +250,14 @@ function onMessage(msg) {
       break;
 
     case 'sync_audio':
+      syncAudioEnabled = msg.enabled;
       if (role !== 'host') {
-        if (msg.enabled && playing && !paused && startTime !== null) {
-          // Розблоковуємо AudioContext і завантажуємо буфер якщо потрібно
-          const doPlay = () => { getCtx(); loadSongBuffer('test').then(scheduleAudio).catch(console.error); };
-          if (audioCtx && audioCtx.state !== 'suspended' && songBuffer) {
-            scheduleAudio(); // буфер готовий — стартуємо одразу
-          } else {
-            // Потрібен user gesture — показуємо підказку
-            setStatus('👆 Tap screen to enable audio');
-            const resume = () => {
-              document.removeEventListener('click', resume);
-              document.removeEventListener('touchstart', resume);
-              setStatus(''); doPlay();
-            };
-            document.addEventListener('click', resume, { once: true });
-            document.addEventListener('touchstart', resume, { once: true });
+        if (msg.enabled) {
+          // Запускаємо аудіо якщо вже грає
+          if (playing && !paused && startTime !== null) {
+            startParticipantAudio();
           }
-        } else if (!msg.enabled) {
+        } else {
           stopAudioNode();
           setStatus('');
         }
@@ -318,8 +309,39 @@ syncCheck.addEventListener('change', () => {
 // =============================================================================
 // Playback handlers
 // =============================================================================
+// =============================================================================
+// Participant audio start — з обробкою autoplay policy
+// =============================================================================
+function startParticipantAudio() {
+  const doPlay = () => {
+    getCtx();
+    if (songBuffer) {
+      scheduleAudio();
+    } else {
+      loadSongBuffer('test').then(scheduleAudio).catch(console.error);
+    }
+  };
+
+  // Якщо AudioContext вже розблокований — стартуємо одразу
+  if (audioCtx && audioCtx.state === 'running') {
+    doPlay();
+  } else {
+    // Потрібен дотик — показуємо підказку
+    setStatus('👆 Tap screen to enable audio');
+    const unlock = () => {
+      document.removeEventListener('click', unlock);
+      document.removeEventListener('touchstart', unlock);
+      setStatus('');
+      doPlay();
+    };
+    document.addEventListener('click', unlock, { once: true });
+    document.addEventListener('touchstart', unlock, { once: true });
+  }
+}
+
 async function onPlay(song) {
   playing = true; paused = false;
+  requestWakeLock();
   if (role === 'host') {
     playBtn.textContent  = 'Stop';
     pauseBtn.hidden      = false;
@@ -327,11 +349,13 @@ async function onPlay(song) {
   }
   setStatus('');
   startAnimation();
-  // Хост завжди грає; учасники — тільки якщо галочка (транслюється через sync_audio)
   if (role === 'host') {
     getCtx();
     try { await loadSongBuffer(song); scheduleAudio(); }
     catch (err) { setStatus('⚠ ' + err.message); }
+  } else if (syncAudioEnabled) {
+    // Хост вже увімкнув "play on all" — запускаємо
+    startParticipantAudio();
   }
 }
 
@@ -366,6 +390,7 @@ async function onResume(song) {
 
 function onStop() {
   playing = false; paused = false; startTime = null; pauseTime = null;
+  releaseWakeLock();
   stopAudioNode(); songBuffer = null;
   if (role === 'host') {
     playBtn.textContent = 'Play';
@@ -426,6 +451,32 @@ document.addEventListener('click', e => {
     const o = e.target.textContent; e.target.textContent = 'Copied!';
     setTimeout(() => { e.target.textContent = o; }, 1500);
   });
+});
+
+
+// =============================================================================
+// Wake Lock – не дає екрану гаснути під час відтворення
+// =============================================================================
+let wakeLock = null;
+
+async function requestWakeLock() {
+  if ('wakeLock' in navigator) {
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } catch (err) { /* не критично */ }
+  }
+}
+
+function releaseWakeLock() {
+  if (wakeLock) { wakeLock.release(); wakeLock = null; }
+}
+
+// Повторно запитуємо Wake Lock якщо сторінка стала видимою знову
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && playing && !paused) {
+    requestWakeLock();
+  }
 });
 
 init();
