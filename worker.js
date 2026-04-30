@@ -11,6 +11,16 @@ export default {
       const songs = getSongList(env);
       return cors(json(songs));
     }
+    // GET /api/debug — показує маніфест для дебагу
+    if (url.pathname === '/api/debug') {
+      try {
+        const manifest = JSON.parse(env.__STATIC_CONTENT_MANIFEST);
+        const keys = Object.keys(manifest).filter(k => k.startsWith('songs/'));
+        return cors(json({ keys, total: Object.keys(manifest).length }));
+      } catch(e) {
+        return cors(json({ error: e.message }));
+      }
+    }
 
     if (url.pathname === '/create') {
       const roomId   = crypto.randomUUID().split('-')[0].slice(0, 6);
@@ -40,18 +50,17 @@ export default {
 // Cloudflare автоматично надає цю змінну — це JSON з усіма файлами assets
 // =============================================================================
 function getSongList(env) {
+  // Спробуємо __STATIC_CONTENT_MANIFEST
   try {
     const manifest = JSON.parse(env.__STATIC_CONTENT_MANIFEST);
     const songs = new Set();
     Object.keys(manifest).forEach(k => {
-      // Тільки нова структура: songs/<папка>/<файл>.mp3
-      const m = k.match(/^songs\/([^\/]+)\/[^\/]+\.mp3$/);
+      const m = k.match(/^songs\/([^/]+)\/[^/]+\.mp3$/);
       if (m) songs.add(m[1]);
     });
-    return [...songs].sort();
-  } catch {
-    return [];
-  }
+    if (songs.size > 0) return [...songs].sort();
+  } catch {}
+  return [];
 }
 
 // =============================================================================
