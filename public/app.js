@@ -3,7 +3,7 @@
 // =============================================================================
 
 // ── CONFIGURE THIS after deploying the worker ─────────────────────────────────
-const WORKER_URL = 'https://karaoke-worker.slovo-wiry.workers.dev';
+const WORKER_URL = 'https://pisni.slovo-wiry.workers.dev';
 // ─────────────────────────────────────────────────────────────────────────────
 
 'use strict';
