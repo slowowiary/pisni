@@ -155,9 +155,28 @@
       text-align: center;
       will-change: transform;
     }
-    .word { display: inline-block; color: #999; transition: color .08s; }
+    .word {
+      display: inline-block;
+      color: #999;
+      transition: color .1s;
+      /* Резервуємо місце для жирного шрифту щоб текст не стрибав */
+      font-weight: 400;
+    }
+    /* Невидимий жирний pseudo-element займає місце постійно */
+    .word::after {
+      content: attr(data-word);
+      display: block;
+      font-weight: 700;
+      height: 0;
+      overflow: hidden;
+      visibility: hidden;
+    }
     .word.done   { color: #666; }
-    .word.active { color: #e91e63; font-weight: 700; }
+    .word.active {
+      color: #e91e63;
+      font-weight: 700;
+      text-shadow: 0 0 8px rgba(233, 30, 99, 0.3);
+    }
 
     /* ── Список пісень ──────────────────────────────────────── */
     #song-picker {
