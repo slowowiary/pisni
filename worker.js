@@ -10,49 +10,68 @@ export default {
       return cors(new Response(null, { status: 204 }));
     }
 
-    // POST /create  →  generate a fresh room ID
     if (url.pathname === '/create') {
       const roomId = crypto.randomUUID().split('-')[0].slice(0, 6);
+      // Pre-create the DO so it persists
+      const stub = env.KARAOKE_ROOM.get(env.KARAOKE_ROOM.idFromName(roomId));
+      await stub.fetch(new Request(new URL('/init', request.url)));
       return cors(json({ roomId }));
     }
 
-    // /room/:id/time   or   /room/:id/ws
     const m = url.pathname.match(/^\/room\/([a-z0-9]+)(\/.*)?$/i);
     if (m) {
-      const stub = env.KARAOKE_ROOM.get(env.KARAOKE_ROOM.idFromName(m[1]));
-      return stub.fetch(request);
+      const sub = m[2] || '';
+      if (sub === '/time' || sub === '/ws') {
+        const stub = env.KARAOKE_ROOM.get(env.KARAOKE_ROOM.idFromName(m[1]));
+        return stub.fetch(request);
+      }
+      // SPA: serve index.html
+      return env.ASSETS.fetch(new Request(new URL('/', url.origin), request));
     }
 
-    return new Response('Not found', { status: 404 });
+    return env.ASSETS.fetch(request);
   },
 };
 
 // =============================================================================
-// Durable Object – one instance per room
+// Durable Object
 // =============================================================================
 export class KaraokeRoom {
   constructor(state) {
-    this.state = state;
-    // Kept in memory; DO stays alive while WebSockets are open.
-    this.sessions = []; // Array<{ ws, clientId, role }>
+    this.state     = state;
+    this.sessions  = [];
     this.playing   = false;
-    this.startTime = null; // server-side ms timestamp of play start
+    this.startTime = null;
     this.song      = null;
+    this.ready     = false;
+  }
+
+  async ensureLoaded() {
+    if (this.ready) return;
+    // Load persisted state from DO storage
+    this.playing   = (await this.state.storage.get('playing'))   ?? false;
+    this.startTime = (await this.state.storage.get('startTime')) ?? null;
+    this.song      = (await this.state.storage.get('song'))      ?? null;
+    this.ready     = true;
   }
 
   async fetch(request) {
+    await this.ensureLoaded();
     const url = new URL(request.url);
 
     if (request.method === 'OPTIONS') {
       return cors(new Response(null, { status: 204 }));
     }
 
-    // ── GET /room/:id/time ──────────────────────────────────────────────────
+    // Init endpoint – just wakes up and persists the DO
+    if (url.pathname.endsWith('/init') || url.pathname === '/init') {
+      return cors(json({ ok: true }));
+    }
+
     if (url.pathname.endsWith('/time')) {
       return cors(json({ serverTime: Date.now() }));
     }
 
-    // ── GET /room/:id/ws  (WebSocket upgrade) ───────────────────────────────
     if (url.pathname.endsWith('/ws')) {
       if (request.headers.get('Upgrade') !== 'websocket') {
         return new Response('Expected WebSocket upgrade', { status: 426 });
@@ -65,7 +84,6 @@ export class KaraokeRoom {
     return new Response('Not found', { status: 404 });
   }
 
-  // ---------------------------------------------------------------------------
   handleSession(ws) {
     ws.accept();
 
@@ -74,76 +92,70 @@ export class KaraokeRoom {
     const session  = { ws, clientId, role };
     this.sessions.push(session);
 
-    // Tell the client who they are
     ws.send(JSON.stringify({ type: 'joined', role, clientId, serverTime: Date.now() }));
 
-    // Late-joiner: send current playback state so they sync immediately
+    // Late-joiner sync
     if (this.playing && this.startTime !== null) {
       ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song }));
     }
 
-    ws.addEventListener('message', ev  => this.onMessage(session, ev.data));
+    ws.addEventListener('message', ev => this.onMessage(session, ev.data));
     ws.addEventListener('close',   ()  => this.onClose(session));
     ws.addEventListener('error',   ()  => this.onClose(session));
   }
 
-  // ---------------------------------------------------------------------------
-  onMessage(session, raw) {
+  async onMessage(session, raw) {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
 
     switch (msg.type) {
-
-      // Client → server time probe (NTP-style)
       case 'ping':
         session.ws.send(JSON.stringify({
           type: 'pong',
           serverTime: Date.now(),
-          clientTime: msg.clientTime,   // echo back so client can compute RTT
+          clientTime: msg.clientTime,
         }));
         break;
 
-      // Host starts playback
       case 'play':
         if (session.role !== 'host') return;
         this.playing   = true;
         this.startTime = Date.now();
         this.song      = msg.song || 'test';
+        // Persist to storage so state survives reconnects
+        await this.state.storage.put('playing',   this.playing);
+        await this.state.storage.put('startTime', this.startTime);
+        await this.state.storage.put('song',      this.song);
         this.broadcast({ type: 'play', startTime: this.startTime, song: this.song });
         break;
 
-      // Host stops playback
       case 'stop':
         if (session.role !== 'host') return;
         this.playing   = false;
         this.startTime = null;
+        await this.state.storage.put('playing',   false);
+        await this.state.storage.delete('startTime');
         this.broadcast({ type: 'stop' });
         break;
     }
   }
 
-  // ---------------------------------------------------------------------------
   onClose(session) {
     this.sessions = this.sessions.filter(s => s !== session);
 
-    // If host left, promote the next client
     if (session.role === 'host' && this.sessions.length > 0) {
-      const next  = this.sessions[0];
-      next.role   = 'host';
+      const next = this.sessions[0];
+      next.role  = 'host';
       next.ws.send(JSON.stringify({ type: 'promoted', role: 'host' }));
     }
 
-    if (this.sessions.length === 0) {
-      this.playing   = false;
-      this.startTime = null;
-    }
+    // Note: we do NOT clear playing/startTime here so late-joiners still sync
   }
 
-  // ---------------------------------------------------------------------------
   broadcast(msg) {
     const raw = JSON.stringify(msg);
     for (const s of this.sessions) {
-      try { s.ws.send(raw); } catch { /* ignore closed sockets */ }
+      try { s.ws.send(raw); } catch { /* ignore */ }
     }
   }
 }
