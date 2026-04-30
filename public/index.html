@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Пісні — Зміст роки підзні</title>
+  <title>Slowiary Worship</title>
   <style>
     [hidden] { display: none !important; }
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -31,10 +31,22 @@
       z-index: 100;
       box-shadow: 0 2px 8px rgba(63,81,181,.08);
     }
-    header h1 {
-      font-size: 1.2rem;
-      font-weight: 700;
+    .header-brand {
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+    }
+    .header-logo {
+      height: 38px;
+      width: auto;
+      object-fit: contain;
+    }
+    .header-worship {
+      font-size: 1rem;
+      font-weight: 600;
       color: #3f51b5;
+      letter-spacing: .08em;
+      text-transform: uppercase;
     }
 
     /* Динамік клієнта в шапці */
@@ -200,7 +212,10 @@
 <body>
 
   <header>
-    <h1>🎤 Зміст роки підзні</h1>
+    <div class="header-brand">
+      <img src="/slowiarylogo.jpg" alt="Slowiary" class="header-logo">
+      <span class="header-worship">Worship</span>
+    </div>
     <!-- Динамік — показується клієнту коли хост увімкнув sync -->
     <div id="header-audio-toggle" hidden title="Натисніть щоб заглушити">
       <span class="speaker-icon">🔊</span>
@@ -252,7 +267,7 @@
 
   </main>
 
-  <footer>© 2026 Зміст роки підзні · Всі права захищені</footer>
+  <footer>© 2026 Slowiary Worship · Всі права захищені</footer>
 
   <script src="/app.js"></script>
 </body>
