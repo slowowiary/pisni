@@ -169,6 +169,15 @@ async function enterRoom(id) {
   setStatus('Syncing clock…'); await syncTime(id);
   setStatus('Loading lyrics…'); await loadLyrics('test');
   setStatus('Connecting…'); connectWS(id);
+  // Завантажуємо аудіо буфер після першого кліку (браузер вимагає user gesture)
+  const unlockAudio = () => {
+    document.removeEventListener('click', unlockAudio);
+    document.removeEventListener('touchstart', unlockAudio);
+    getCtx(); // розблоковуємо AudioContext
+    loadSongBuffer('test').catch(() => {});
+  };
+  document.addEventListener('click', unlockAudio, { once: true });
+  document.addEventListener('touchstart', unlockAudio, { once: true });
 }
 
 // =============================================================================
@@ -240,13 +249,26 @@ function onMessage(msg) {
       break;
 
     case 'sync_audio':
-      // Хост транслює зміну галочки всім учасникам
       if (role !== 'host') {
-        if (msg.enabled && playing && !paused) {
-          getCtx();
-          loadSongBuffer('test').then(scheduleAudio).catch(console.error);
+        if (msg.enabled && playing && !paused && startTime !== null) {
+          // Розблоковуємо AudioContext і завантажуємо буфер якщо потрібно
+          const doPlay = () => { getCtx(); loadSongBuffer('test').then(scheduleAudio).catch(console.error); };
+          if (audioCtx && audioCtx.state !== 'suspended' && songBuffer) {
+            scheduleAudio(); // буфер готовий — стартуємо одразу
+          } else {
+            // Потрібен user gesture — показуємо підказку
+            setStatus('👆 Tap screen to enable audio');
+            const resume = () => {
+              document.removeEventListener('click', resume);
+              document.removeEventListener('touchstart', resume);
+              setStatus(''); doPlay();
+            };
+            document.addEventListener('click', resume, { once: true });
+            document.addEventListener('touchstart', resume, { once: true });
+          }
         } else if (!msg.enabled) {
           stopAudioNode();
+          setStatus('');
         }
       }
       break;
