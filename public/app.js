@@ -190,8 +190,17 @@ function startScroll() {
   stopScroll();
   (function tick() {
     const diff = targetScrollY - currentScrollY;
-    if (Math.abs(diff) > 0.3) {
-      const speed = Math.min(0.06, 0.03 + Math.abs(diff) / 2000);
+    // Завжди рухаємось — навіть 1px за кадр
+    if (diff > 0.05) {
+      // Швидкість залежить від того наскільки далеко активне слово від низу
+      let speed;
+      if (diff > 150) {
+        speed = 0.018;      // останній рядок — помітно швидше
+      } else if (diff > 60) {
+        speed = 0.006;      // 60% блока — трошки скорше
+      } else {
+        speed = 0.002;      // 20-30% — майже непомітно, піксель за кадр
+      }
       currentScrollY += diff * speed;
       lyricsEl.style.transform = `translateY(${-currentScrollY}px)`;
     }
@@ -209,9 +218,19 @@ function updateScroll() {
   if (!lyricsContainer || !lyricsEl) return;
   const activeSpan = lyricsEl.querySelector('.word.active');
   if (!activeSpan) return;
-  const containerH    = lyricsContainer.clientHeight;
-  const wordTop       = activeSpan.offsetTop;
-  targetScrollY       = Math.max(0, wordTop - containerH * 0.30);
+  const containerH = lyricsContainer.clientHeight;
+  // Позиція активного слова відносно поточного скролу (тобто в контейнері)
+  const wordTop    = activeSpan.offsetTop;
+  const wordInView = wordTop - currentScrollY; // де слово зараз видно
+
+  // Починаємо ціль скролу на основі де слово в контейнері:
+  // < 25% — починаємо дуже повільно рухати
+  // 25-60% — трошки швидше  
+  // > 60% — швидко підтягнути
+  if (wordInView > containerH * 0.20) {
+    // Ціль: тримати активне слово на рівні 20% від низу контейнера
+    targetScrollY = Math.max(0, wordTop - containerH * 0.80);
+  }
 }
 
 // =============================================================================
@@ -475,12 +494,14 @@ function onMessage(msg) {
                 audioReady = true;
                 setStatus('');
                 if (playing && !paused && startTime !== null) {
-                  await resyncAndPlay(5);
+                  // Буфер щойно завантажився під час відтворення —
+                  // синхронізуємось і запускаємо з правильної позиції
+                  await resyncAndPlay(6);
                 }
               })
               .catch(() => setStatus('⚠ Не вдалось завантажити аудіо'));
           } else if (audioReady && playing && !paused && startTime !== null && !getMuted()) {
-            resyncAndPlay(5);
+            await resyncAndPlay(6);
           }
         } else {
           // Хост вимкнув sync — зупиняємо
