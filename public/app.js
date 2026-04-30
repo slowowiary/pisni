@@ -357,27 +357,7 @@ async function init() {
   if (id) {
     roomId = id;
     if (localStorage.getItem('karaoke_host_room') === id) {
-      // Хост оновив сторінку — надсилаємо stop щоб зупинити відтворення
-      // Підключаємось тимчасово тільки щоб відправити stop
-      try {
-        const tempWs = new WebSocket(
-          WORKER_URL.replace('https','wss').replace('http','ws') + '/room/' + id + '/ws'
-        );
-        tempWs.addEventListener('open', () => {
-          const cid = localStorage.getItem('karaoke_client_id');
-          tempWs.send(JSON.stringify({ type: 'hello', clientId: cid }));
-        });
-        // Чекаємо joined, потім stop
-        tempWs.addEventListener('message', e => {
-          try {
-            const msg = JSON.parse(e.data);
-            if (msg.type === 'joined' && msg.role === 'host') {
-              tempWs.send(JSON.stringify({ type: 'stop' }));
-              setTimeout(() => tempWs.close(), 200);
-            }
-          } catch {}
-        });
-      } catch {}
+      // Хост — входить одразу
       initAudio(); audioUnlocked = true;
       await enterRoom(id);
     } else {
@@ -701,9 +681,10 @@ function renderWords() {
       lyricsEl.appendChild(br);
     }
     const s = document.createElement('span');
-    s.textContent = e.word;
-    s.className   = 'word';
-    s.dataset.i   = i;        // зберігаємо індекс для швидкого доступу
+    s.textContent  = e.word;
+    s.className    = 'word';
+    s.dataset.i    = i;
+    s.dataset.word = e.word; // для ::before псевдоелемента
     lyricsEl.appendChild(s);
     lyricsEl.appendChild(document.createTextNode(' '));
   });
