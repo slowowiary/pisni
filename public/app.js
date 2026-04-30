@@ -108,11 +108,19 @@ function onSongEnded() {
 }
 
 async function resyncAndPlay(n) {
-  for (let i = 0; i < n; i++) {
+  // Робимо n замірів з мінімальним інтервалом (20ms) для точності
+  // Використовуємо Promise.all для паралельності — швидше і точніше
+  const doSample = async () => {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
     if (res && res.ok) addSample((await res.json()).serverTime, t0);
-    if (i < n - 1) await new Promise(r => setTimeout(r, 80));
+  };
+  // Перші 3 — паралельно для швидкого початкового offset
+  await Promise.all([doSample(), doSample(), doSample()]);
+  // Ще 2 — послідовно з паузою для уточнення
+  for (let i = 0; i < 2; i++) {
+    await new Promise(r => setTimeout(r, 20));
+    await doSample();
   }
   scheduleAudio();
 }
@@ -190,11 +198,14 @@ function updateScroll() {
   const activeSpan = lyricsEl.querySelector('.word.active');
   if (!activeSpan) return;
   const containerH = lyricsContainer.clientHeight;
-  const wordTop    = activeSpan.offsetTop;
+  const wordTop    = activeSpan.offsetTop; // абсолютна позиція від початку lyricsEl
+  // Позиція слова відносно видимої зони (з урахуванням поточного скролу)
   const wordInView = wordTop - currentScrollY;
-  // Починаємо рухати коли активне слово перейшло 20% контейнера
-  if (wordInView > containerH * 0.20) {
-    targetScrollY = Math.max(0, wordTop - containerH * 0.80);
+  // Завжди тримаємо ціль так щоб активне слово було на 25% від низу
+  // тобто target = wordTop - (containerH * 0.75)
+  // Але починаємо рухатись тільки коли слово перейшло 30% контейнера
+  if (wordInView > containerH * 0.30) {
+    targetScrollY = Math.max(0, wordTop - containerH * 0.75);
   }
 }
 
