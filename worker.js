@@ -6,20 +6,16 @@ export default {
     const url = new URL(request.url);
     if (request.method === 'OPTIONS') return cors(new Response(null, { status: 204 }));
 
-    // GET /api/songs — сканує assets і повертає список пісень
+    // GET /api/songs — читає auto-generated songs/index.json
     if (url.pathname === '/api/songs') {
-      const songs = getSongList(env);
-      return cors(json(songs));
-    }
-    // GET /api/debug — показує маніфест для дебагу
-    if (url.pathname === '/api/debug') {
       try {
-        const manifest = JSON.parse(env.__STATIC_CONTENT_MANIFEST);
-        const keys = Object.keys(manifest).filter(k => k.startsWith('songs/'));
-        return cors(json({ keys, total: Object.keys(manifest).length }));
-      } catch(e) {
-        return cors(json({ error: e.message }));
-      }
+        const r = await env.ASSETS.fetch(new Request(new URL('/songs/index.json', url.origin)));
+        if (r.ok) {
+          const text = await r.text();
+          return cors(new Response(text, { headers: { 'Content-Type': 'application/json' } }));
+        }
+      } catch {}
+      return cors(json([]));
     }
 
     if (url.pathname === '/create') {
@@ -49,19 +45,7 @@ export default {
 // Сканування пісень через __STATIC_CONTENT_MANIFEST
 // Cloudflare автоматично надає цю змінну — це JSON з усіма файлами assets
 // =============================================================================
-function getSongList(env) {
-  // Спробуємо __STATIC_CONTENT_MANIFEST
-  try {
-    const manifest = JSON.parse(env.__STATIC_CONTENT_MANIFEST);
-    const songs = new Set();
-    Object.keys(manifest).forEach(k => {
-      const m = k.match(/^songs\/([^/]+)\/[^/]+\.mp3$/);
-      if (m) songs.add(m[1]);
-    });
-    if (songs.size > 0) return [...songs].sort();
-  } catch {}
-  return [];
-}
+
 
 // =============================================================================
 // Durable Object
