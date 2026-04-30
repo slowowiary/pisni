@@ -1,0 +1,7 @@
+{
+  "name": "pisni",
+  "scripts": {
+    "build": "node build-index.js",
+    "deploy": "npm run build && wrangler deploy"
+  }
+}
