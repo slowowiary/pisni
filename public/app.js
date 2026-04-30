@@ -2,23 +2,19 @@
 // Karaoke – frontend
 // =============================================================================
 
-// ── CONFIGURE THIS after deploying the worker ─────────────────────────────────
 const WORKER_URL = 'https://pisni.slovo-wiry.workers.dev';
-// ─────────────────────────────────────────────────────────────────────────────
 
 'use strict';
 
-// ── State ────────────────────────────────────────────────────────────────────
 let ws        = null;
-let role      = null;   // 'host' | 'participant'
-let offset    = 0;      // serverTime – clientTime  (ms)
-let startTime = null;   // server timestamp (ms) when playback began
+let role      = null;
+let offset    = 0;
+let startTime = null;
 let playing   = false;
-let lyrics    = [];     // [{ word, start, end }, ...]
+let lyrics    = [];
 let animFrame = null;
 let roomId    = null;
 
-// ── DOM refs ─────────────────────────────────────────────────────────────────
 const homeView  = document.getElementById('home-view');
 const roomView  = document.getElementById('room-view');
 const createBtn = document.getElementById('create-btn');
@@ -27,21 +23,28 @@ const roomUrlEl = document.getElementById('room-url');
 const lyricsEl  = document.getElementById('lyrics');
 const statusEl  = document.getElementById('status');
 
-// Audio plays ONLY on the host device — never touched on participant side
 const audio   = new Audio();
 audio.preload = 'auto';
+
+// =============================================================================
+// Persistent client identity
+// =============================================================================
+function getMyClientId() {
+  let id = localStorage.getItem('karaoke_client_id');
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem('karaoke_client_id', id);
+  }
+  return id;
+}
 
 // =============================================================================
 // Boot
 // =============================================================================
 async function init() {
-  // SPA redirect: Cloudflare Pages / GitHub Pages 404.html encodes the
-  // original path into ?p=  so index.html can restore it via replaceState.
   const params     = new URLSearchParams(location.search);
   const redirected = params.get('p');
-  if (redirected) {
-    history.replaceState(null, '', redirected);
-  }
+  if (redirected) history.replaceState(null, '', redirected);
 
   const id = parseRoomFromPath();
   if (id) {
@@ -63,7 +66,8 @@ createBtn.addEventListener('click', async () => {
   createBtn.disabled    = true;
   createBtn.textContent = 'Creating…';
   try {
-    const res = await fetch(`${WORKER_URL}/create`);
+    const clientId = getMyClientId();
+    const res = await fetch(`${WORKER_URL}/create?clientId=${encodeURIComponent(clientId)}`);
     if (!res.ok) throw new Error(`Server responded ${res.status}`);
     const { roomId: id } = await res.json();
     history.pushState(null, '', `/room/${id}`);
@@ -82,7 +86,6 @@ async function enterRoom(id) {
   roomId = id;
   homeView.hidden = true;
   roomView.hidden = false;
-
   roomUrlEl.textContent = location.href;
 
   setStatus('Syncing clock…');
@@ -96,20 +99,17 @@ async function enterRoom(id) {
 }
 
 // =============================================================================
-// NTP-style clock sync
+// Clock sync
 // =============================================================================
 async function syncTime(id) {
   const t0 = Date.now();
   const res = await fetch(`${WORKER_URL}/room/${id}/time`);
   const { serverTime } = await res.json();
   const t1 = Date.now();
-  // Assume symmetric RTT; server time sits at the midpoint
   offset = serverTime - Math.round((t0 + t1) / 2);
 }
 
-function serverNow() {
-  return Date.now() + offset;
-}
+function serverNow() { return Date.now() + offset; }
 
 // =============================================================================
 // WebSocket
@@ -121,16 +121,17 @@ function connectWS(id) {
   ws = new WebSocket(wsUrl);
 
   ws.addEventListener('open', () => {
-    // Refine clock offset every 10 s while connected
+    // Надсилаємо наш постійний clientId — сервер перевірить чи ми хост
+    ws.send(JSON.stringify({ type: 'hello', clientId: getMyClientId() }));
+
     setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
+      if (ws.readyState === WebSocket.OPEN)
         ws.send(JSON.stringify({ type: 'ping', clientTime: Date.now() }));
-      }
     }, 10_000);
   });
 
   ws.addEventListener('message', e => {
-    try { onMessage(JSON.parse(e.data)); } catch { /* ignore bad frames */ }
+    try { onMessage(JSON.parse(e.data)); } catch {}
   });
 
   ws.addEventListener('close', () => {
@@ -142,14 +143,13 @@ function connectWS(id) {
 }
 
 // =============================================================================
-// Message handler
+// Messages
 // =============================================================================
 function onMessage(msg) {
   switch (msg.type) {
-
     case 'joined':
       role   = msg.role;
-      offset = msg.serverTime - Date.now(); // coarse initial offset
+      offset = msg.serverTime - Date.now();
       if (role === 'host') {
         audio.src           = '/songs/test.mp3';
         playBtn.hidden      = false;
@@ -189,28 +189,21 @@ function onMessage(msg) {
 // =============================================================================
 playBtn.addEventListener('click', () => {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  if (!playing) {
-    ws.send(JSON.stringify({ type: 'play', song: 'test' }));
-  } else {
-    ws.send(JSON.stringify({ type: 'stop' }));
-  }
+  ws.send(JSON.stringify({ type: playing ? 'stop' : 'play', song: 'test' }));
 });
 
 function beginPlayback(srvStart, song) {
   startTime = srvStart;
   playing   = true;
-
-  // Audio only on host
   if (role === 'host') {
-    const elapsed       = (serverNow() - startTime) / 1000;
-    audio.currentTime   = Math.max(0, elapsed);
+    const elapsed     = (serverNow() - startTime) / 1000;
+    audio.currentTime = Math.max(0, elapsed);
     audio.play().catch(() => {
       setStatus('Tap anywhere to allow audio playback.');
       document.addEventListener('click', () => audio.play(), { once: true });
     });
     playBtn.textContent = 'Stop';
   }
-
   setStatus('');
   startAnimation();
 }
@@ -218,7 +211,6 @@ function beginPlayback(srvStart, song) {
 function stopPlayback() {
   playing   = false;
   startTime = null;
-
   if (role === 'host') {
     audio.pause();
     audio.currentTime   = 0;
@@ -227,7 +219,6 @@ function stopPlayback() {
   } else {
     setStatus('Waiting for the host to start…');
   }
-
   stopAnimation();
   clearHighlights();
 }
@@ -259,7 +250,7 @@ function renderWords() {
 }
 
 // =============================================================================
-// Animation loop – highlights the current word every frame
+// Animation
 // =============================================================================
 function startAnimation() {
   stopAnimation();
@@ -272,19 +263,14 @@ function startAnimation() {
 }
 
 function stopAnimation() {
-  if (animFrame !== null) {
-    cancelAnimationFrame(animFrame);
-    animFrame = null;
-  }
+  if (animFrame !== null) { cancelAnimationFrame(animFrame); animFrame = null; }
 }
 
 function highlight(elapsed) {
   document.querySelectorAll('.word').forEach((span, i) => {
-    const w        = lyrics[i];
-    const isActive = elapsed >= w.start && elapsed < w.end;
-    const isDone   = elapsed >= w.end;
-    span.classList.toggle('active', isActive);
-    span.classList.toggle('done',   isDone && !isActive);
+    const w = lyrics[i];
+    span.classList.toggle('active', elapsed >= w.start && elapsed < w.end);
+    span.classList.toggle('done',   elapsed >= w.end);
   });
 }
 
@@ -292,22 +278,15 @@ function clearHighlights() {
   document.querySelectorAll('.word').forEach(s => s.classList.remove('active', 'done'));
 }
 
-// =============================================================================
-// Helpers
-// =============================================================================
-function setStatus(msg) {
-  statusEl.textContent = msg;
-}
+function setStatus(msg) { statusEl.textContent = msg; }
 
-// Click room-url box → copy to clipboard
 document.addEventListener('click', e => {
   if (e.target.id !== 'room-url') return;
   navigator.clipboard.writeText(e.target.textContent).then(() => {
-    const orig          = e.target.textContent;
+    const orig = e.target.textContent;
     e.target.textContent = 'Copied!';
     setTimeout(() => { e.target.textContent = orig; }, 1500);
   });
 });
 
-// =============================================================================
 init();
