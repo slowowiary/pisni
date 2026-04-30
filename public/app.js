@@ -168,46 +168,14 @@ async function syncTime(id) {
 // =============================================================================
 // Scroll — дуже повільна базова, прискорення тільки коли текст біля низу
 // =============================================================================
-function startScroll() {
-  stopScroll();
-  (function tick() {
-    const diff = targetScrollY - currentScrollY;
-    if (diff > 0.05) {
-      let speed;
-      if (diff > 150) speed = 0.018;       // текст біля низу — помітно швидше
-      else if (diff > 60) speed = 0.006;   // 60% — трошки швидше
-      else speed = 0.002;                  // початок — майже непомітно
-      currentScrollY += diff * speed;
-      lyricsEl.style.transform = `translateY(${-currentScrollY}px)`;
-    }
-    scrollAnimFrame = requestAnimationFrame(tick);
-  })();
-}
-
-function stopScroll() {
-  if (scrollAnimFrame) { cancelAnimationFrame(scrollAnimFrame); scrollAnimFrame = null; }
-}
-
 function resetScroll() {
   currentScrollY = 0; targetScrollY = 0;
   if (lyricsEl) lyricsEl.style.transform = 'translateY(0)';
 }
 
-function updateScroll() {
-  if (!lyricsContainer || !lyricsEl) return;
-  const activeSpan = lyricsEl.querySelector('.word.active');
-  if (!activeSpan) return;
-  const containerH = lyricsContainer.clientHeight;
-  const wordTop    = activeSpan.offsetTop; // абсолютна позиція від початку lyricsEl
-  // Позиція слова відносно видимої зони (з урахуванням поточного скролу)
-  const wordInView = wordTop - currentScrollY;
-  // Завжди тримаємо ціль так щоб активне слово було на 25% від низу
-  // тобто target = wordTop - (containerH * 0.75)
-  // Але починаємо рухатись тільки коли слово перейшло 30% контейнера
-  if (wordInView > containerH * 0.30) {
-    targetScrollY = Math.max(0, wordTop - containerH * 0.75);
-  }
-}
+// startScroll/stopScroll — пусті заглушки, логіка в startAnimation
+function startScroll() {}
+function stopScroll()  {}
 
 // =============================================================================
 // Song list
@@ -584,18 +552,49 @@ function renderWords() {
 }
 
 // =============================================================================
-// Animation
+// Animation + Scroll — єдиний RAF loop
 // =============================================================================
 function startAnimation() {
   stopAnimation();
   (function tick() {
-    if (!playing || paused || startTime === null) return;
+    if (!playing || paused || startTime === null) {
+      animFrame = requestAnimationFrame(tick);
+      return;
+    }
     const t = (serverNow() - startTime) / 1000;
-    highlight(t); updateScroll();
+
+    // Підсвічування слів
+    highlight(t);
+
+    // Прокрутка — оновлюємо ціль і рухаємо
+    const activeSpan = lyricsEl ? lyricsEl.querySelector('.word.active') : null;
+    if (activeSpan && lyricsContainer) {
+      const containerH = lyricsContainer.clientHeight;
+      const wordTop    = activeSpan.offsetTop;
+      const wordInView = wordTop - currentScrollY;
+      // Коли слово перейшло 30% висоти — починаємо рухати
+      if (wordInView > containerH * 0.30) {
+        targetScrollY = Math.max(0, wordTop - containerH * 0.70);
+      }
+    }
+
+    // Плавний рух до цілі
+    const diff = targetScrollY - currentScrollY;
+    if (diff > 0.3) {
+      let speed;
+      if      (diff > 150) speed = 0.020;
+      else if (diff > 60)  speed = 0.007;
+      else                 speed = 0.003;
+      currentScrollY += diff * speed;
+      if (lyricsEl) lyricsEl.style.transform = `translateY(${-currentScrollY}px)`;
+    }
+
     animFrame = requestAnimationFrame(tick);
   })();
 }
-function stopAnimation() { if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; } }
+function stopAnimation() {
+  if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
+}
 
 function highlight(t) {
   document.querySelectorAll('.word').forEach((s, i) => {
