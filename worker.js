@@ -18,6 +18,17 @@ export default {
       return cors(json([]));
     }
 
+    // POST /room/:id/host-stop — зупиняє відтворення якщо запит від хоста
+    const stopMatch = url.pathname.match(/^\/room\/([a-z0-9]+)\/host-stop$/i);
+    if (stopMatch) {
+      const clientId = url.searchParams.get('clientId') || '';
+      const stub = env.KARAOKE_ROOM.get(env.KARAOKE_ROOM.idFromName(stopMatch[1]));
+      return stub.fetch(new Request(
+        new URL(`/host-stop?clientId=${encodeURIComponent(clientId)}`, url).toString(),
+        { method: 'POST' }
+      ));
+    }
+
     if (url.pathname === '/create') {
       const roomId   = crypto.randomUUID().split('-')[0].slice(0, 6);
       const clientId = url.searchParams.get('clientId') || crypto.randomUUID();
@@ -35,10 +46,8 @@ export default {
         const stub = env.KARAOKE_ROOM.get(env.KARAOKE_ROOM.idFromName(m[1]));
         return stub.fetch(request);
       }
-      // SPA: /room/:id → повертаємо index.html
       return env.ASSETS.fetch(new Request(new URL('/', url.origin).toString()));
     }
-    // Всі інші запити — роздаємо статичні файли (jpg, mp3, тощо)
     return env.ASSETS.fetch(request);
   },
 };
@@ -89,6 +98,21 @@ export class KaraokeRoom {
       return cors(json({ ok: true }));
     }
     if (url.pathname.endsWith('/time')) return cors(json({ serverTime: Date.now() }));
+
+    if (url.pathname.endsWith('/host-stop')) {
+      const clientId = url.searchParams.get('clientId') || '';
+      // Перевіряємо що це справжній хост
+      if (this.hostClientId && clientId === this.hostClientId) {
+        this.playing = false; this.paused = false;
+        this.startTime = null; this.pauseTime = null;
+        await this.state.storage.put('playing', false);
+        await this.state.storage.put('paused', false);
+        await this.state.storage.delete('startTime');
+        await this.state.storage.delete('pauseTime');
+        this.broadcast({ type: 'stop' });
+      }
+      return cors(json({ ok: true }));
+    }
     if (url.pathname.endsWith('/state')) {
       return cors(json({ syncAudio: this.syncAudio }));
     }
