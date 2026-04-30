@@ -41,19 +41,16 @@ export default {
 // =============================================================================
 function getSongList(env) {
   try {
-    // Нова структура: songs/назва_пісні/аудіо.mp3
-    // Повертаємо список назв папок (унікальні)
     const manifest = JSON.parse(env.__STATIC_CONTENT_MANIFEST);
-    const folders = new Set();
+    const songs = new Set();
     Object.keys(manifest).forEach(k => {
-      // Шукаємо: songs/<папка>/<будь-що>.mp3
-      const m = k.match(/^songs\/([^/]+)\/[^/]+\.mp3$/);
-      if (m) folders.add(m[1]);
+      // Тільки нова структура: songs/<папка>/<файл>.mp3
+      const m = k.match(/^songs\/([^\/]+)\/[^\/]+\.mp3$/);
+      if (m) songs.add(m[1]);
     });
-    const songs = [...folders].sort();
-    return songs.length > 0 ? songs : ['test'];
+    return [...songs].sort();
   } catch {
-    return ['test'];
+    return [];
   }
 }
 
