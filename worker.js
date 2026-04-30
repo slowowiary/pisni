@@ -41,12 +41,16 @@ export default {
 // =============================================================================
 function getSongList(env) {
   try {
-    // env.__STATIC_CONTENT_MANIFEST — рядок JSON виду {"songs/test.mp3":"hashed-url",...}
+    // Нова структура: songs/назва_пісні/аудіо.mp3
+    // Повертаємо список назв папок (унікальні)
     const manifest = JSON.parse(env.__STATIC_CONTENT_MANIFEST);
-    const songs = Object.keys(manifest)
-      .filter(k => k.startsWith('songs/') && k.endsWith('.mp3'))
-      .map(k => k.slice('songs/'.length, -'.mp3'.length))
-      .sort();
+    const folders = new Set();
+    Object.keys(manifest).forEach(k => {
+      // Шукаємо: songs/<папка>/<будь-що>.mp3
+      const m = k.match(/^songs\/([^/]+)\/[^/]+\.mp3$/);
+      if (m) folders.add(m[1]);
+    });
+    const songs = [...folders].sort();
     return songs.length > 0 ? songs : ['test'];
   } catch {
     return ['test'];
