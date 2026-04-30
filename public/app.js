@@ -162,13 +162,36 @@ async function syncOnEntry(id) {
   }
 }
 
-// Ресинхронізація перед запуском — 3 паралельних запити
+// Ресинхронізація — 3 паралельних запити для точного offset
 async function resync() {
   await Promise.all([0,1,2].map(async () => {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
     if (res?.ok) addSample((await res.json()).serverTime, t0);
   }));
+}
+
+// Після старту робимо ще 2 корекції: через 1с і через 3с
+// Якщо дрейф > 50ms — перезапускаємо з правильної позиції
+function schedulePostStartCorrections() {
+  [1000, 3000].forEach(delay => {
+    setTimeout(async () => {
+      if (!playing || paused || startTime === null) return;
+      // Один запит для уточнення offset
+      const t0  = Date.now();
+      const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
+      if (!res?.ok) return;
+      addSample((await res.json()).serverTime, t0);
+      // Перевіряємо дрейф
+      if (!sourceNode || !audioCtx) return;
+      const expected = (serverNow() - startTime) / 1000;
+      const actual   = sourceNode._off + (audioCtx.currentTime - sourceNode._when);
+      const drift    = Math.abs(actual - expected);
+      if (drift > 0.05) { // > 50ms — коригуємо
+        scheduleAudio();
+      }
+    }, delay);
+  });
 }
 
 // =============================================================================
@@ -283,7 +306,7 @@ if (headerToggle) {
     updateSpeakerUI();
     // Якщо вмикаємо звук під час відтворення — синхронізуємось
     if (!isMuted && syncAudioEnabled && audioUnlocked && playing && !paused && startTime !== null) {
-      resync().then(scheduleAudio);
+      resync().then(() => { scheduleAudio(); schedulePostStartCorrections(); });
     } else if (isMuted) {
       stopNode(); // зупиняємо відтворення
     }
@@ -467,6 +490,7 @@ async function handleMsg(msg) {
       if (role === 'host' || (syncAudioEnabled && audioUnlocked && audioBuffer && !isMuted)) {
         await resync();
         scheduleAudio();
+        schedulePostStartCorrections();
       }
       break;
     }
@@ -512,6 +536,7 @@ async function handleMsg(msg) {
           if (playing && !paused && startTime !== null) {
             await resync();
             scheduleAudio();
+            schedulePostStartCorrections();
           }
         }
       } else {
@@ -560,6 +585,7 @@ async function doPlay(song) {
     }
     await resync();
     scheduleAudio();
+    schedulePostStartCorrections();
 
   } else if (syncAudioEnabled && audioUnlocked && !isMuted) {
     // Клієнт: завантажуємо буфер і синхронізуємось
@@ -570,6 +596,7 @@ async function doPlay(song) {
     }
     await resync();
     scheduleAudio();
+    schedulePostStartCorrections();
   }
   // Якщо syncAudioEnabled=false — нічого не завантажуємо на клієнт
 }
