@@ -76,7 +76,11 @@ async function loadBuffer(song) {
   getCtx();
   const res = await fetch('/songs/' + song + '.mp3');
   if (!res.ok) throw new Error('MP3 not found');
-  buffers[song] = await audioCtx.decodeAudioData(await res.arrayBuffer());
+  const arrayBuf = await res.arrayBuffer();
+  // iOS Safari: decodeAudioData може не підтримувати Promise — обгортаємо
+  buffers[song] = await new Promise((resolve, reject) => {
+    audioCtx.decodeAudioData(arrayBuf, resolve, reject);
+  });
   return buffers[song];
 }
 
@@ -88,8 +92,12 @@ async function scheduleAudio() {
   if (!buf || startTime === null || !audioCtx) return;
   stopAudioNode();
   // iOS: чекаємо поки AudioContext відновиться
-  if (audioCtx.state === 'suspended') {
-    try { await audioCtx.resume(); } catch {}
+  if (audioCtx.state !== 'running') {
+    try {
+      await audioCtx.resume();
+      // Додаткова пауза для iOS щоб контекст повністю активувався
+      await new Promise(r => setTimeout(r, 50));
+    } catch {}
   }
   // Перераховуємо після resume (пройшов час)
   const msUntil = startTime - serverNow();
@@ -392,12 +400,22 @@ function onMessage(msg) {
         songPicker.hidden = false; playBtn.hidden = true;
         pauseBtn.hidden = true; syncLabel.hidden = false;
         headerToggle.hidden = true; lyricsContainer.hidden = true;
+        // Відновлюємо стан галочки
+        const savedSync = localStorage.getItem('karaoke_sync_audio') === '1';
+        syncCheck.checked = savedSync;
+        syncLabel.classList.toggle('on', savedSync);
+        if (savedSync && ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'sync_audio', enabled: true }));
+        }
         setStatus('Виберіть пісню зі списку нижче.');
       } else {
         // Клієнт
         songPicker.hidden = true; playBtn.hidden = true;
         pauseBtn.hidden = true; syncLabel.hidden = true;
-        headerToggle.hidden = true; lyricsContainer.hidden = true;
+        // Завжди ховаємо headerToggle — покажемо тільки через sync_audio
+        headerToggle.hidden = true;
+        lyricsContainer.hidden = true;
+        syncAudioEnabled = false; // скидаємо — отримаємо від сервера
         setStatus('Очікування хоста…');
       }
       break;
@@ -483,10 +501,11 @@ pauseBtn.addEventListener('click', () => {
 });
 
 syncCheck.addEventListener('change', () => {
-  getCtx();
   syncLabel.classList.toggle('on', syncCheck.checked);
-  if (role === 'host' && ws && ws.readyState === WebSocket.OPEN)
+  if (role === 'host' && ws && ws.readyState === WebSocket.OPEN) {
+    localStorage.setItem('karaoke_sync_audio', syncCheck.checked ? '1' : '0');
     ws.send(JSON.stringify({ type: 'sync_audio', enabled: syncCheck.checked }));
+  }
 });
 
 // =============================================================================
