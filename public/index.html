@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Пісні — Зміст роки підзні</title>
+  <title>Slowiary Worship</title>
   <style>
     [hidden] { display: none !important; }
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -31,10 +31,22 @@
       z-index: 100;
       box-shadow: 0 2px 8px rgba(63,81,181,.08);
     }
-    header h1 {
-      font-size: 1.2rem;
+    .header-brand {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+    }
+    .header-logo {
+      width: 50px;
+      height: auto;
+      object-fit: contain;
+    }
+    .header-worship {
+      font-size: 1rem;
       font-weight: 700;
       color: #3f51b5;
+      letter-spacing: .08em;
+      text-transform: uppercase;
     }
 
     /* Динамік клієнта в шапці */
@@ -155,29 +167,9 @@
       text-align: center;
       will-change: transform;
     }
-    .word {
-      display: inline-block;
-      color: #999;
-      transition: color .1s;
-      font-weight: 400;
-    }
-    /* ::before резервує місце для "жирного" тексту постійно —
-       тому ширина span не змінюється коли active */
-    .word::before {
-      content: attr(data-word);
-      display: block;
-      font-weight: 700;
-      height: 0;
-      overflow: hidden;
-      visibility: hidden;
-      pointer-events: none;
-    }
-    .word.done   { color: #777; }
-    .word.active {
-      color: #e91e63;
-      /* Імітуємо жирність через text-shadow без зміни ширини */
-      text-shadow: 0 0 0.4px #e91e63, 0 0 0.4px #e91e63;
-    }
+    .word { display: inline-block; color: #999; transition: color .08s; }
+    .word.done   { color: #666; }
+    .word.active { color: #e91e63; font-weight: 700; }
 
     /* ── Список пісень ──────────────────────────────────────── */
     #song-picker {
@@ -220,8 +212,10 @@
 <body>
 
   <header>
-    <h1>🎤 Зміст роки підзні</h1>
-    <!-- Динамік — показується клієнту коли хост увімкнув sync -->
+    <div class="header-brand">
+      <img src="slowiarylogo.jpg" alt="Slowiary" class="header-logo">
+      <span class="header-worship">Worship</span>
+    </div>
     <div id="header-audio-toggle" hidden title="Натисніть щоб заглушити">
       <span class="speaker-icon">🔊</span>
     </div>
@@ -272,7 +266,7 @@
 
   </main>
 
-  <footer>© 2026 Зміст роки підзні · Всі права захищені</footer>
+  <footer>© 2026 Slowiary Worship · Всі права захищені</footer>
 
   <script src="/app.js"></script>
 </body>
