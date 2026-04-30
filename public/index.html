@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Karaoke — Зміст роки підзні</title>
+  <title>Пісні — Зміст роки підзні</title>
   <style>
     [hidden] { display: none !important; }
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -21,7 +21,7 @@
     header {
       background: #fff;
       border-bottom: 2px solid #dde3ff;
-      padding: 0 2rem;
+      padding: 0 1.5rem;
       height: 60px;
       display: flex;
       align-items: center;
@@ -32,31 +32,30 @@
       box-shadow: 0 2px 8px rgba(63,81,181,.08);
     }
     header h1 {
-      font-size: 1.3rem;
+      font-size: 1.2rem;
       font-weight: 700;
       color: #3f51b5;
-      letter-spacing: .05em;
     }
 
-    /* Динамік учасника в шапці */
+    /* Динамік клієнта в шапці */
     #header-audio-toggle {
-      display: flex; align-items: center; gap: .4rem;
-      cursor: pointer; padding: .35rem .7rem;
-      border: 2px solid #ddd; border-radius: 8px;
-      background: #fafafa;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 42px; height: 42px;
+      border-radius: 50%;
+      border: 2px solid #c5cae9;
+      background: #e8eaf6;
+      cursor: pointer;
+      font-size: 1.3rem;
       transition: border-color .2s, background .2s;
       user-select: none;
     }
-    #header-audio-toggle input { display: none; }
-    #header-audio-toggle .speaker { font-size: 1.4rem; transition: transform .15s; }
-    #header-audio-toggle.loading { border-color: #ff9800; background: #fff8e1; animation: pulse 1s infinite; }
-    #header-audio-toggle.ready   { border-color: #4caf50; background: #e8f5e9; }
-    #header-audio-toggle.ready .speaker { transform: scale(1.1); }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
-
-    /* Mute стан */
-    #header-audio-toggle.muted { border-color: #f44336; background: #ffebee; }
-    #header-audio-toggle.muted .speaker::after { content: ''; }
+    #header-audio-toggle:hover { border-color: #3f51b5; }
+    #header-audio-toggle.muted {
+      border-color: #ef9a9a;
+      background: #ffebee;
+    }
 
     /* ── ОСНОВНИЙ КОНТЕНТ ───────────────────────────────────── */
     main {
@@ -71,18 +70,39 @@
       margin: 0 auto;
     }
 
+    /* ── Екран входу (join) ──────────────────────────────────── */
+    #join-screen {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1.2rem;
+      text-align: center;
+      padding: 2rem 1rem;
+      max-width: 420px;
+    }
+    #join-screen .join-icon { font-size: 3rem; }
+    #join-screen h2 { font-size: 1.5rem; color: #3f51b5; font-weight: 700; }
+    #join-screen p  { color: #555; font-size: .95rem; line-height: 1.6; }
+    #join-btn {
+      background: #3f51b5; color: #fff; border: none;
+      padding: .9rem 3rem; font-size: 1.1rem; font-weight: 600;
+      border-radius: 10px; cursor: pointer;
+      transition: background .15s, transform .1s;
+    }
+    #join-btn:hover  { background: #303f9f; transform: translateY(-1px); }
+    #join-btn:active { transform: translateY(0); }
+
+    /* ── Кімната ─────────────────────────────────────────────── */
     #status { font-size: .9rem; color: #888; min-height: 1.3em; text-align: center; }
 
     #room-url {
       background: #fff; border: 1px solid #c5cae9; border-radius: 8px;
       padding: .55rem 1rem; font-size: .85rem; color: #3f51b5;
       word-break: break-all; cursor: pointer; width: 100%; text-align: center;
-      transition: border-color .15s;
     }
     #room-url:hover { border-color: #3f51b5; }
     #room-url-label { font-size: .75rem; color: #999; margin-bottom: -.6rem; }
 
-    /* ── Кнопки ─────────────────────────────────────────────── */
     .btn-row { display: flex; gap: .8rem; align-items: center; justify-content: center; flex-wrap: wrap; }
 
     button {
@@ -94,19 +114,8 @@
     button:hover  { background: #303f9f; transform: translateY(-1px); }
     button:active { transform: translateY(0); }
     button:disabled { background: #bbb; cursor: not-allowed; transform: none; }
-
-    #pause-btn  { background: #5c6bc0; padding: .75rem 1.6rem; }
+    #pause-btn { background: #5c6bc0; padding: .75rem 1.6rem; }
     #pause-btn:hover { background: #3949ab; }
-
-    /* Кнопка «Зайти» для клієнта — велика */
-    #join-btn {
-      font-size: 1.2rem;
-      padding: 1.1rem 3.5rem;
-      background: #3f51b5;
-      border-radius: 12px;
-      letter-spacing: .05em;
-    }
-    #join-btn:hover { background: #303f9f; }
 
     /* Галочка хоста */
     #sync-audio-label {
@@ -114,18 +123,17 @@
       cursor: pointer; padding: .55rem 1.1rem;
       border: 2px solid #c5cae9; border-radius: 8px;
       background: #fff; font-size: .9rem; color: #555;
-      transition: border-color .15s, background .15s;
       user-select: none;
+      transition: border-color .15s, background .15s;
     }
     #sync-audio-label:hover { border-color: #3f51b5; }
     #sync-audio-label.on { border-color: #3f51b5; background: #e8eaf6; color: #3f51b5; font-weight: 600; }
     #sync-audio-label input { accent-color: #3f51b5; width: 1rem; height: 1rem; cursor: pointer; }
 
-    /* ── БЛОК СУБТИТРІВ ─────────────────────────────────────── */
+    /* ── Блок субтитрів ─────────────────────────────────────── */
     #lyrics-container {
-      width: 100%;
-      max-width: 720px;
-      height: 340px;
+      width: 100%; max-width: 720px;
+      height: 320px;
       overflow: hidden;
       position: relative;
       background: #fff;
@@ -135,8 +143,7 @@
     }
     #lyrics-container::before,
     #lyrics-container::after {
-      content: '';
-      position: absolute; left: 0; right: 0; height: 50px;
+      content: ''; position: absolute; left: 0; right: 0; height: 48px;
       pointer-events: none; z-index: 2;
     }
     #lyrics-container::before { top: 0;    background: linear-gradient(#fff, transparent); }
@@ -146,15 +153,13 @@
       font-size: clamp(1.2rem, 3.5vw, 1.8rem);
       line-height: 2.3;
       text-align: center;
-      transition: transform .6s cubic-bezier(.25,.46,.45,.94);
       will-change: transform;
     }
-
     .word { display: inline-block; color: #999; transition: color .08s; }
     .word.done   { color: #666; }
     .word.active { color: #e91e63; font-weight: 700; }
 
-    /* ── СПИСОК ПІСЕНЬ ──────────────────────────────────────── */
+    /* ── Список пісень ──────────────────────────────────────── */
     #song-picker {
       width: 100%; background: #fff;
       border: 1px solid #dde3ff; border-radius: 10px; overflow: hidden;
@@ -179,14 +184,7 @@
     #song-list li .playing-icon { animation: bounce .5s infinite alternate; }
     @keyframes bounce { from{transform:scaleY(.8)} to{transform:scaleY(1.2)} }
 
-    /* Екран очікування клієнта */
-    #join-screen {
-      display: flex; flex-direction: column; align-items: center;
-      gap: 1.5rem; padding: 2rem 1rem; text-align: center;
-    }
-    #join-screen h2 { font-size: 1.4rem; color: #3f51b5; }
-    #join-screen p  { color: #666; font-size: .95rem; max-width: 340px; }
-
+    /* Головна */
     #home-view {
       display: flex; flex-direction: column; align-items: center;
       gap: 1rem; padding: 3rem 0;
@@ -203,30 +201,25 @@
 
   <header>
     <h1>🎤 Зміст роки підзні</h1>
-    <label id="header-audio-toggle" hidden title="Грати музику на моєму пристрої">
-      <input type="checkbox" id="my-audio-check">
-      <span class="speaker">🔇</span>
-    </label>
+    <!-- Динамік — показується клієнту коли хост увімкнув sync -->
+    <div id="header-audio-toggle" hidden title="Натисніть щоб заглушити">
+      <span class="speaker-icon">🔊</span>
+    </div>
   </header>
 
   <main>
-    <!-- Головна -->
+
+    <!-- Головна сторінка -->
     <div id="home-view" hidden>
       <button id="create-btn" style="font-size:1.1rem;padding:1rem 3rem">🎵 Створити кімнату</button>
     </div>
 
-    <!-- Екран входу клієнта -->
+    <!-- Екран входу для клієнта -->
     <div id="join-screen" hidden>
-      <h2>🎤 Вас запрошують до кімнати</h2>
-      <p>Натисніть кнопку нижче, щоб приєднатися та дозволити відтворення музики</p>
-      <!-- mute-line — показується тільки якщо хост увімкнув sync -->
-      <div id="mute-line" hidden style="display:flex;align-items:center;gap:.6rem">
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.9rem;color:#555">
-          <input type="checkbox" id="mute-check" style="width:1.1rem;height:1.1rem;accent-color:#3f51b5">
-          🔇 Зайти в беззвучному режимі
-        </label>
-      </div>
-      <button id="join-btn">🎵 Зайти</button>
+      <div class="join-icon">🙏</div>
+      <h2>Христос Воскрес!</h2>
+      <p>Вас запрошують поспівати разом.<br>Прославте Бога разом з нами!</p>
+      <button id="join-btn">🎵 Зайти в кімнату</button>
     </div>
 
     <!-- Кімната -->
@@ -256,6 +249,7 @@
       </div>
 
     </div>
+
   </main>
 
   <footer>© 2026 Зміст роки підзні · Всі права захищені</footer>
