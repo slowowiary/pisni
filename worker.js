@@ -137,6 +137,7 @@ export class KaraokeRoom {
     session.ws.send(JSON.stringify({
       type: 'joined', role: session.role,
       clientId: session.clientId, serverTime: Date.now(),
+      syncAudio: this.syncAudio,  // передаємо поточний стан одразу
     }));
     if (this.playing && !this.paused && this.startTime !== null) {
       session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio }));
