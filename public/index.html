@@ -5,9 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Karaoke</title>
   <style>
-    /* hidden attribute must win over any display rule below */
     [hidden] { display: none !important; }
-
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
@@ -30,11 +28,7 @@
       text-transform: uppercase;
     }
 
-    p.sub {
-      color: #666;
-      font-size: 0.95rem;
-      margin-top: -0.5rem;
-    }
+    p.sub { color: #666; font-size: 0.95rem; margin-top: -0.5rem; }
 
     button {
       background: #ff4081;
@@ -47,26 +41,22 @@
       cursor: pointer;
       transition: background 0.15s, transform 0.1s;
     }
-    button:hover   { background: #e0305e; transform: translateY(-1px); }
-    button:active  { transform: translateY(0); }
+    button:hover  { background: #e0305e; transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
     button:disabled { background: #444; cursor: not-allowed; transform: none; }
 
-    /* ── Home view ─────────────────────────────────────────── */
+    #pause-btn {
+      background: #555;
+    }
+    #pause-btn:hover { background: #444; }
+
     #home-view {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 1.5rem;
+      display: flex; flex-direction: column; align-items: center; gap: 1.5rem;
     }
 
-    /* ── Room view ─────────────────────────────────────────── */
     #room-view {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 1rem;
-      width: 100%;
-      max-width: 820px;
+      display: flex; flex-direction: column; align-items: center;
+      gap: 1rem; width: 100%; max-width: 820px;
     }
 
     #room-url {
@@ -84,26 +74,39 @@
     }
     #room-url:hover { border-color: #7ab4ff; }
 
-    #room-url-label {
-      font-size: 0.75rem;
-      color: #555;
-      margin-bottom: -0.5rem;
+    #room-url-label { font-size: 0.75rem; color: #555; margin-bottom: -0.5rem; }
+
+    #status { font-size: 0.9rem; color: #777; min-height: 1.3em; text-align: center; }
+
+    .btn-row {
+      display: flex; gap: 1rem; align-items: center; justify-content: center;
     }
 
-    #status {
+    #play-btn  { font-size: 1.3rem; padding: 1rem 4rem; letter-spacing: 0.1em; }
+    #pause-btn { font-size: 1rem; padding: 0.8rem 2rem; }
+
+    /* Галочки */
+    .audio-toggle {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
       font-size: 0.9rem;
-      color: #777;
-      min-height: 1.3em;
-      text-align: center;
+      color: #aaa;
+      cursor: pointer;
+      padding: 0.5rem 1rem;
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      transition: border-color 0.15s, color 0.15s;
+      user-select: none;
     }
-
-    #play-btn {
-      font-size: 1.3rem;
-      padding: 1rem 4rem;
-      letter-spacing: 0.1em;
+    .audio-toggle:hover { border-color: #ff4081; color: #eee; }
+    .audio-toggle input {
+      width: 1.1rem; height: 1.1rem;
+      cursor: pointer;
+      accent-color: #ff4081;
     }
+    .audio-toggle input:checked + span { color: #ff4081; }
 
-    /* ── Lyrics ─────────────────────────────────────────────── */
     #lyrics {
       margin-top: 1.5rem;
       font-size: clamp(1.4rem, 4vw, 2.2rem);
@@ -112,41 +115,22 @@
       max-width: 720px;
     }
 
-    .word {
-      display: inline-block;
-      color: #3a3a3a;
-      transition: color 0.08s, transform 0.08s;
-    }
-
+    .word { display: inline-block; color: #3a3a3a; transition: color 0.08s, transform 0.08s; }
     .word.done   { color: #666; }
-
     .word.active {
-      color: #ff4081;
-      transform: scale(1.18);
-      font-weight: 700;
-      text-shadow: 0 0 20px rgba(255, 64, 129, 0.5);
+      color: #ff4081; transform: scale(1.18);
+      font-weight: 700; text-shadow: 0 0 20px rgba(255,64,129,0.5);
     }
-    #sync-audio-label {
-      font-size: 0.9rem;
-      color: #888;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-    #sync-audio-label input { width: 1.1rem; height: 1.1rem; cursor: pointer; accent-color: #ff4081; }
   </style>
 </head>
 <body>
 
-  <!-- ── Home ─────────────────────────────────────────────── -->
   <div id="home-view" hidden>
     <h1>Karaoke</h1>
     <p class="sub">Create a room and share the link with friends</p>
     <button id="create-btn">Create Room</button>
   </div>
 
-  <!-- ── Room ─────────────────────────────────────────────── -->
   <div id="room-view" hidden>
     <h1>Karaoke</h1>
 
@@ -155,10 +139,22 @@
 
     <div id="status"></div>
 
-    <button id="play-btn" hidden>Play</button>
-    <button id="pause-btn" hidden>Pause</button>
+    <div class="btn-row">
+      <button id="play-btn"  hidden>Play</button>
+      <button id="pause-btn" hidden>Pause</button>
+    </div>
 
-    <label id="sync-audio-label" hidden><input type="checkbox" id="sync-audio-check"> 🎵 Play music on all connected devices</label>
+    <!-- Хост: увімкнути музику на всіх пристроях -->
+    <label id="sync-audio-label" class="audio-toggle" hidden>
+      <input type="checkbox" id="sync-audio-check">
+      <span>🎵 Play music on all connected devices</span>
+    </label>
+
+    <!-- Учасник: особиста галочка -->
+    <label id="my-audio-label" class="audio-toggle" hidden>
+      <input type="checkbox" id="my-audio-check" checked>
+      <span>🔊 Play music on my device</span>
+    </label>
 
     <div id="lyrics"></div>
   </div>
