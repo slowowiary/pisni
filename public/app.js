@@ -490,18 +490,16 @@ function onMessage(msg) {
             getCtx();
             setStatus('⏳ Завантаження аудіо…');
             loadBuffer(currentSong)
-              .then(async () => {
+              .then(() => {
                 audioReady = true;
                 setStatus('');
                 if (playing && !paused && startTime !== null) {
-                  // Буфер щойно завантажився під час відтворення —
-                  // синхронізуємось і запускаємо з правильної позиції
-                  await resyncAndPlay(6);
+                  resyncAndPlay(6);
                 }
               })
               .catch(() => setStatus('⚠ Не вдалось завантажити аудіо'));
           } else if (audioReady && playing && !paused && startTime !== null && !getMuted()) {
-            await resyncAndPlay(6);
+            resyncAndPlay(6);
           }
         } else {
           // Хост вимкнув sync — зупиняємо
@@ -583,7 +581,7 @@ function onPause() {
   else setStatus('Хост поставив на паузу…');
 }
 
-async function onResume(song) {
+async async function onResume(song) {
   paused = false; setStatus(''); startAnimation(); startScroll(); requestWakeLock();
   if (role === 'host') {
     pauseBtn.textContent = '⏸ Пауза';
