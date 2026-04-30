@@ -357,7 +357,27 @@ async function init() {
   if (id) {
     roomId = id;
     if (localStorage.getItem('karaoke_host_room') === id) {
-      // Хост — входить одразу
+      // Хост оновив сторінку — надсилаємо stop щоб зупинити відтворення
+      // Підключаємось тимчасово тільки щоб відправити stop
+      try {
+        const tempWs = new WebSocket(
+          WORKER_URL.replace('https','wss').replace('http','ws') + '/room/' + id + '/ws'
+        );
+        tempWs.addEventListener('open', () => {
+          const cid = localStorage.getItem('karaoke_client_id');
+          tempWs.send(JSON.stringify({ type: 'hello', clientId: cid }));
+        });
+        // Чекаємо joined, потім stop
+        tempWs.addEventListener('message', e => {
+          try {
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'joined' && msg.role === 'host') {
+              tempWs.send(JSON.stringify({ type: 'stop' }));
+              setTimeout(() => tempWs.close(), 200);
+            }
+          } catch {}
+        });
+      } catch {}
       initAudio(); audioUnlocked = true;
       await enterRoom(id);
     } else {
@@ -488,12 +508,7 @@ async function handleMsg(msg) {
       startTime        = msg.startTime;
       paused           = false;
       syncAudioEnabled = msg.syncAudio || false;
-      if (msg.song !== currentSong) {
-        // Пісня змінилась — скидаємо буфер
-        clearBuffer();
-        currentSong = msg.song;
-        await loadLyrics(msg.song);
-      }
+      if (msg.song !== currentSong) { currentSong = msg.song; await loadLyrics(msg.song); }
       await doPlay(msg.song);
       break;
     }
