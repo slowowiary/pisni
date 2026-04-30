@@ -270,5 +270,16 @@
   <footer>© 2026 Slowiary Worship · Всі права захищені</footer>
 
   <script src="/app.js"></script>
+  <video id="wake-video" loop muted playsinline
+  style="position:fixed;width:1px;height:1px;opacity:0;pointer-events:none">
+  <source src="data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28ybXA0MQAAAAhmcmVlAAAA" type="video/mp4">
+</video>
+<script>
+// iOS Wake Lock — грає порожнє відео щоб екран не гас
+document.addEventListener('click', () => {
+  const v = document.getElementById('wake-video');
+  if (v && v.paused) v.play().catch(() => {});
+}, { once: true });
+</script>
 </body>
 </html>
