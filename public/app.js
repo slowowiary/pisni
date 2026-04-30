@@ -357,7 +357,27 @@ async function init() {
   if (id) {
     roomId = id;
     if (localStorage.getItem('karaoke_host_room') === id) {
-      // Хост — входить одразу
+      // Хост оновив сторінку — надсилаємо stop щоб зупинити відтворення
+      // Підключаємось тимчасово тільки щоб відправити stop
+      try {
+        const tempWs = new WebSocket(
+          WORKER_URL.replace('https','wss').replace('http','ws') + '/room/' + id + '/ws'
+        );
+        tempWs.addEventListener('open', () => {
+          const cid = localStorage.getItem('karaoke_client_id');
+          tempWs.send(JSON.stringify({ type: 'hello', clientId: cid }));
+        });
+        // Чекаємо joined, потім stop
+        tempWs.addEventListener('message', e => {
+          try {
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'joined' && msg.role === 'host') {
+              tempWs.send(JSON.stringify({ type: 'stop' }));
+              setTimeout(() => tempWs.close(), 200);
+            }
+          } catch {}
+        });
+      } catch {}
       initAudio(); audioUnlocked = true;
       await enterRoom(id);
     } else {
@@ -697,14 +717,6 @@ let wordSpans = [];
 
 function cacheSpans() {
   wordSpans = Array.from(lyricsEl?.querySelectorAll('.word') || []);
-  // Фіксуємо ширину кожного span одразу після рендеру
-  // Тоді при зміні кольору браузер НЕ може змінити ширину елемента
-  requestAnimationFrame(() => {
-    wordSpans.forEach(s => {
-      const w = s.getBoundingClientRect().width;
-      s.style.width = w + 'px';
-    });
-  });
 }
 
 function startAnim() {
