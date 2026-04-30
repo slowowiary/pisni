@@ -604,15 +604,23 @@ async function loadLyrics(song) {
   try {
     const res = await fetch('/songs/' + song + '.json');
     if (!res.ok) { lyricsEl.innerHTML = ''; lyrics = []; return; }
-    lyrics = await res.json(); renderWords(); resetScroll();
+    lyrics = await res.json(); renderWords(); cacheSpans(); resetScroll();
   } catch { lyricsEl.innerHTML = ''; lyrics = []; }
 }
 
 function renderWords() {
   lyricsEl.innerHTML = '';
   lyrics.forEach((e, i) => {
+    // Перенос рядка якщо пауза між словами > 2 секунди
+    if (i > 0 && (e.start - lyrics[i-1].end) >= 2.0) {
+      const br = document.createElement('div');
+      br.style.height = '0.6em';
+      lyricsEl.appendChild(br);
+    }
     const s = document.createElement('span');
-    s.textContent = e.word; s.className = 'word';
+    s.textContent = e.word;
+    s.className   = 'word';
+    s.dataset.i   = i;        // зберігаємо індекс для швидкого доступу
     lyricsEl.appendChild(s);
     lyricsEl.appendChild(document.createTextNode(' '));
   });
@@ -621,23 +629,34 @@ function renderWords() {
 // =============================================================================
 // Animation
 // =============================================================================
+// Кеш span елементів для швидкого доступу
+let wordSpans = [];
+
+function cacheSpans() {
+  wordSpans = Array.from(lyricsEl?.querySelectorAll('.word') || []);
+}
+
 function startAnim() {
   stopAnim();
   (function tick() {
     if (!playing || paused || startTime === null) return;
     const t = (serverNow() - startTime) / 1000;
-    lyrics.forEach((w, i) => {
-      const s = lyricsEl?.children[i * 2];
-      if (!s) return;
-      s.classList.toggle('active', t >= w.start && t < w.end);
-      s.classList.toggle('done',   t >= w.end && !(t >= w.start && t < w.end));
-    });
+    for (let i = 0; i < wordSpans.length; i++) {
+      const w = lyrics[i];
+      if (!w) continue;
+      const active = t >= w.start && t < w.end;
+      const done   = t >= w.end && !active;
+      wordSpans[i].classList.toggle('active', active);
+      wordSpans[i].classList.toggle('done',   done);
+    }
     updateScroll();
     animFrame = requestAnimationFrame(tick);
   })();
 }
 function stopAnim() { if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; } }
-function clearHL() { lyricsEl?.querySelectorAll('.word').forEach(s => s.classList.remove('active','done')); }
+function clearHL() {
+  wordSpans.forEach(s => s.classList.remove('active','done'));
+}
 
 function setStatus(m) { if (statusEl) statusEl.textContent = m; }
 
