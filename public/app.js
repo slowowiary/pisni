@@ -9,61 +9,44 @@ let lyrics = [], animFrame = null, roomId = null;
 let startTime = null, pauseTime = null;
 let currentSong      = null;
 let buffers          = {};
-let sourceNode       = null, audioCtx = null, gainNode = null;
+let sourceNode       = null, audioCtx = null;
 let syncAudioEnabled = false;
-let clientJoined     = false;
+let myAudioEnabled   = false;
 let audioReady       = false;
 let wakeLock         = null;
 let songs            = [];
 let scrollAnimFrame  = null;
-let currentScrollY   = 0;
-let targetScrollY    = 0;
-
-function getMuted()    { return localStorage.getItem('karaoke_muted') === '1'; }
-function setMuted(val) { localStorage.setItem('karaoke_muted', val ? '1' : '0'); }
 
 // DOM
-const homeView        = document.getElementById('home-view');
-const joinScreen      = document.getElementById('join-screen');
-const joinBtn         = document.getElementById('join-btn');
-const muteLine        = document.getElementById('mute-line');
-const roomView        = document.getElementById('room-view');
-const createBtn       = document.getElementById('create-btn');
-const playBtn         = document.getElementById('play-btn');
-const pauseBtn        = document.getElementById('pause-btn');
-const syncLabel       = document.getElementById('sync-audio-label');
-const syncCheck       = document.getElementById('sync-audio-check');
-const headerToggle    = document.getElementById('header-audio-toggle');
-const muteCheck       = document.getElementById('mute-check');
-const songPicker      = document.getElementById('song-picker');
-const songList        = document.getElementById('song-list');
+const homeView       = document.getElementById('home-view');
+const roomView       = document.getElementById('room-view');
+const createBtn      = document.getElementById('create-btn');
+const playBtn        = document.getElementById('play-btn');
+const pauseBtn       = document.getElementById('pause-btn');
+const syncLabel      = document.getElementById('sync-audio-label');
+const syncCheck      = document.getElementById('sync-audio-check');
+const headerToggle   = document.getElementById('header-audio-toggle');
+const myAudioCheck   = document.getElementById('my-audio-check');
+const songPicker     = document.getElementById('song-picker');
+const songList       = document.getElementById('song-list');
 const lyricsContainer = document.getElementById('lyrics-container');
-const lyricsEl        = document.getElementById('lyrics');
-const roomUrlEl       = document.getElementById('room-url');
-const statusEl        = document.getElementById('status');
+const lyricsEl       = document.getElementById('lyrics');
+const roomUrlEl      = document.getElementById('room-url');
+const statusEl       = document.getElementById('status');
 
 // =============================================================================
 // AudioContext
 // =============================================================================
 function getCtx() {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    gainNode = audioCtx.createGain();
-    gainNode.connect(audioCtx.destination);
-    gainNode.gain.value = getMuted() ? 0 : 1;
-  }
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   if (audioCtx.state === 'suspended') audioCtx.resume();
   return audioCtx;
-}
-
-function applyMute(muted) {
-  if (gainNode) gainNode.gain.value = muted ? 0 : 1;
 }
 
 async function loadBuffer(song) {
   if (buffers[song]) return buffers[song];
   const res = await fetch('/songs/' + song + '.mp3');
-  if (!res.ok) throw new Error('MP3 not found');
+  if (!res.ok) throw new Error('MP3 not found: ' + song);
   buffers[song] = await getCtx().decodeAudioData(await res.arrayBuffer());
   return buffers[song];
 }
@@ -83,7 +66,7 @@ function scheduleAudio() {
   const ctxWhen = Math.max(ctx.currentTime + 0.005, ctx.currentTime + msUntil / 1000);
   const src     = ctx.createBufferSource();
   src.buffer = buf; src._ctxWhen = ctxWhen; src._songOffset = off;
-  src.connect(gainNode);
+  src.connect(ctx.destination);
   src.start(ctxWhen, off);
   sourceNode = src;
   src.onended = () => {
@@ -104,25 +87,22 @@ function onSongEnded() {
   playing = false; paused = false; startTime = null;
   playBtn.textContent = '▶ Грати'; pauseBtn.hidden = true;
   setStatus('Пісня закінчилась. Виберіть наступну.');
-  stopAnimation(); clearHighlights(); stopScroll(); highlightSong(currentSong, false);
+  stopAnimation(); clearHighlights(); stopScroll();
+  highlightSong(currentSong, false);
 }
 
-async function resyncAndPlay(n) {
-  // Робимо n замірів з мінімальним інтервалом (20ms) для точності
-  // Використовуємо Promise.all для паралельності — швидше і точніше
-  const doSample = async () => {
-    const t0  = Date.now();
-    const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
-    if (res && res.ok) addSample((await res.json()).serverTime, t0);
-  };
-  // Перші 3 — паралельно для швидкого початкового offset
-  await Promise.all([doSample(), doSample(), doSample()]);
-  // Ще 2 — послідовно з паузою для уточнення
-  for (let i = 0; i < 2; i++) {
-    await new Promise(r => setTimeout(r, 20));
-    await doSample();
-  }
-  scheduleAudio();
+function resyncIfNeeded() {
+  if (!playing || paused || startTime === null) return;
+  if (!shouldPlayAudio() || !audioReady) return;
+  const expected = (serverNow() - startTime) / 1000;
+  const actual   = currentPos();
+  if (actual === null) { scheduleAudio(); return; }
+  if (Math.abs(actual - expected) > 0.05) scheduleAudio();
+}
+
+function shouldPlayAudio() {
+  if (role === 'host') return true;
+  return syncAudioEnabled && myAudioEnabled && audioReady;
 }
 
 // =============================================================================
@@ -166,16 +146,47 @@ async function syncTime(id) {
 }
 
 // =============================================================================
-// Scroll — дуже повільна базова, прискорення тільки коли текст біля низу
+// Lyrics scroll — плавна прокрутка до активного слова
 // =============================================================================
-function resetScroll() {
-  currentScrollY = 0; targetScrollY = 0;
-  if (lyricsEl) lyricsEl.style.transform = 'translateY(0)';
+let currentScrollY = 0;
+let targetScrollY  = 0;
+
+function startScroll() {
+  stopScroll();
+  function tick() {
+    // Плавне наближення до target
+    const diff = targetScrollY - currentScrollY;
+    if (Math.abs(diff) > 0.5) {
+      currentScrollY += diff * 0.04; // швидкість: 4% за кадр
+      lyricsEl.style.transform = `translateY(${-currentScrollY}px)`;
+    }
+    scrollAnimFrame = requestAnimationFrame(tick);
+  }
+  scrollAnimFrame = requestAnimationFrame(tick);
 }
 
-// startScroll/stopScroll — пусті заглушки, логіка в startAnimation
-function startScroll() {}
-function stopScroll()  {}
+function stopScroll() {
+  if (scrollAnimFrame) { cancelAnimationFrame(scrollAnimFrame); scrollAnimFrame = null; }
+}
+
+function resetScroll() {
+  currentScrollY = 0; targetScrollY = 0;
+  lyricsEl.style.transform = 'translateY(0)';
+}
+
+function updateScroll() {
+  if (!lyricsContainer || !lyricsEl) return;
+  // Знаходимо активне слово
+  const activeSpan = lyricsEl.querySelector('.word.active');
+  if (!activeSpan) return;
+
+  const containerH = lyricsContainer.clientHeight;
+  const wordTop    = activeSpan.offsetTop; // позиція від початку lyricsEl
+
+  // Хочемо щоб активне слово було на рівні 40% висоти контейнера (трохи вище середини)
+  const desiredScroll = wordTop - containerH * 0.4;
+  targetScrollY = Math.max(0, desiredScroll);
+}
 
 // =============================================================================
 // Song list
@@ -206,7 +217,9 @@ function selectSong(song) {
   highlightSong(song, false);
   loadLyrics(song);
   if (role === 'host') {
+    // Показуємо Play
     if (!playing) playBtn.hidden = false;
+    // Завантажуємо буфер тільки обраної пісні, старі чистимо
     for (const k of Object.keys(buffers)) { if (k !== song) delete buffers[k]; }
     getCtx();
     loadBuffer(song).then(() => { audioReady = true; }).catch(console.error);
@@ -229,26 +242,6 @@ function highlightSong(song, isPlaying) {
 }
 
 // =============================================================================
-// Header mute toggle
-// =============================================================================
-function showHeaderToggle(show) {
-  if (!headerToggle) return;
-  headerToggle.hidden = !show;
-  if (show) updateMuteUI();
-}
-
-function updateMuteUI() {
-  const muted = getMuted();
-  if (muteCheck) muteCheck.checked = muted;
-  applyMute(muted);
-  if (headerToggle) {
-    const speaker = headerToggle.querySelector('.speaker');
-    if (speaker) speaker.textContent = muted ? '🔇' : '🔊';
-    headerToggle.classList.toggle('muted', muted);
-  }
-}
-
-// =============================================================================
 // Identity
 // =============================================================================
 function getMyClientId() {
@@ -265,44 +258,15 @@ async function init() {
   if (p) history.replaceState(null, '', p);
   await loadSongList();
   const id = parseRoomFromPath();
-  if (id) {
-    // Перевіряємо стан кімнати — чи хост увімкнув sync
-    let roomSyncAudio = false;
-    try {
-      const res = await fetch(`${WORKER_URL}/room/${id}/state`);
-      if (res.ok) roomSyncAudio = (await res.json()).syncAudio || false;
-    } catch {}
-    showJoinScreen(id, roomSyncAudio);
-  } else {
-    homeView.hidden = false;
-  }
+  if (id) await enterRoom(id); else homeView.hidden = false;
 }
-
 function parseRoomFromPath() {
   const m = location.pathname.match(/\/room\/([a-z0-9]+)/i);
   return m ? m[1] : null;
 }
 
 // =============================================================================
-// Join screen
-// =============================================================================
-function showJoinScreen(id, roomSyncAudio) {
-  joinScreen.hidden = false;
-  // Показуємо mute-вибір тільки якщо хост увімкнув sync
-  if (muteLine) muteLine.hidden = !roomSyncAudio;
-  updateMuteUI();
-
-  joinBtn.addEventListener('click', async () => {
-    joinScreen.hidden = true;
-    getCtx(); // user gesture — розблоковуємо AudioContext
-    clientJoined = true;
-    requestWakeLock();
-    await enterRoom(id);
-  }, { once: true });
-}
-
-// =============================================================================
-// Create room (хост)
+// Create room
 // =============================================================================
 createBtn.addEventListener('click', async () => {
   createBtn.disabled = true; createBtn.textContent = 'Створення…';
@@ -313,7 +277,6 @@ createBtn.addEventListener('click', async () => {
     if (!res.ok) throw new Error(res.status);
     const { roomId: id } = await res.json();
     history.pushState(null, '', '/room/' + id);
-    getCtx();
     await enterRoom(id);
   } catch (err) {
     createBtn.disabled = false; createBtn.textContent = '🎵 Створити кімнату';
@@ -326,7 +289,7 @@ createBtn.addEventListener('click', async () => {
 // =============================================================================
 async function enterRoom(id) {
   roomId = id;
-  homeView.hidden = true; joinScreen.hidden = true; roomView.hidden = false;
+  homeView.hidden = true; roomView.hidden = false;
   roomUrlEl.textContent = location.href;
   setStatus('Синхронізація годинника…'); await syncTime(id);
   setStatus('Підключення…'); connectWS(id);
@@ -343,33 +306,24 @@ function connectWS(id) {
     setInterval(() => {
       if (ws.readyState === WebSocket.OPEN)
         ws.send(JSON.stringify({ type: 'ping', clientTime: Date.now() }));
-    }, 25000);
+    }, 8000);
   });
   ws.addEventListener('message', e => {
     try { onMessage(JSON.parse(e.data)); } catch(err) { console.error('onMessage:', err); }
   });
-  ws.addEventListener('close', () => { setStatus('Перепідключення…'); setTimeout(() => connectWS(id), 2000); });
-  ws.addEventListener('error', () => setStatus('Помилка WebSocket.'));
+  ws.addEventListener('close',   () => { setStatus('Перепідключення…'); setTimeout(() => connectWS(id), 2000); });
+  ws.addEventListener('error',   () => setStatus('Помилка WebSocket.'));
 }
 
 // =============================================================================
-// Mute check handler
+// Header toggle
 // =============================================================================
-if (muteCheck) {
-  muteCheck.addEventListener('change', async () => {
-    const muted = muteCheck.checked;
-    setMuted(muted);
-    updateMuteUI();
-    if (!muted && syncAudioEnabled && clientJoined && playing && !paused && startTime !== null) {
-      setStatus('⏳ Синхронізація…');
-      getCtx();
-      if (currentSong && !buffers[currentSong]) {
-        try { await loadBuffer(currentSong); audioReady = true; } catch (e) { setStatus('⚠ ' + e.message); return; }
-      }
-      await resyncAndPlay(5);
-      setStatus('');
-    }
-  });
+function setHeaderToggleState(state) {
+  headerToggle.className = state === 'off' ? '' : state;
+  const speaker = headerToggle.querySelector('.speaker');
+  if (state === 'off')     speaker.textContent = '🔇';
+  if (state === 'loading') speaker.textContent = '🔄';
+  if (state === 'ready')   speaker.textContent = '🔊';
 }
 
 // =============================================================================
@@ -382,26 +336,27 @@ function onMessage(msg) {
       addSample(msg.serverTime, Date.now() - 50);
       if (role === 'host') {
         buildSongList();
-        songPicker.hidden      = false;
-        playBtn.hidden         = true;
-        pauseBtn.hidden        = true;
-        syncLabel.hidden       = false;
-        showHeaderToggle(false); // хост не бачить mute toggle
+        songPicker.hidden    = false;
+        playBtn.hidden       = true; // сховано до вибору пісні
+        pauseBtn.hidden      = true;
+        syncLabel.hidden     = false;
+        headerToggle.hidden  = true;
         lyricsContainer.hidden = true;
         setStatus('Виберіть пісню зі списку нижче.');
       } else {
-        songPicker.hidden      = true;
-        playBtn.hidden         = true;
-        pauseBtn.hidden        = true;
-        syncLabel.hidden       = true;
-        lyricsContainer.hidden = true;
-        // Динамік показуємо тільки якщо syncAudio увімкнено
-        showHeaderToggle(syncAudioEnabled);
+        songPicker.hidden    = true;
+        playBtn.hidden       = true;
+        pauseBtn.hidden      = true;
+        syncLabel.hidden     = true;
+        headerToggle.hidden  = true;
         setStatus('Очікування хоста…');
       }
       break;
 
-    case 'pong': break; // тільки keepalive
+    case 'pong':
+      addSample(msg.serverTime, msg.clientTime);
+      resyncIfNeeded();
+      break;
 
     case 'play':
       startTime        = msg.startTime;
@@ -426,24 +381,17 @@ function onMessage(msg) {
     case 'sync_audio':
       syncAudioEnabled = msg.enabled;
       if (role !== 'host') {
-        showHeaderToggle(msg.enabled);
         if (msg.enabled) {
-          if (!getMuted() && currentSong && !buffers[currentSong]) {
-            getCtx();
-            setStatus('⏳ Завантаження аудіо…');
-            loadBuffer(currentSong)
-              .then(() => {
-                audioReady = true; setStatus('');
-                if (playing && !paused && startTime !== null) resyncAndPlay(6);
-              })
-              .catch(() => setStatus('⚠ Помилка завантаження'));
-          } else if (audioReady && playing && !paused && startTime !== null && !getMuted()) {
-            resyncAndPlay(6);
-          }
+          headerToggle.hidden = false;
+          if (myAudioEnabled && audioReady && playing && !paused && startTime !== null) scheduleAudio();
         } else {
-          audioReady = false;
+          headerToggle.hidden  = true;
+          myAudioEnabled       = false;
+          myAudioCheck.checked = false;
+          audioReady           = false;
+          setHeaderToggleState('off');
           stopAudioNode();
-          setStatus('Очікування хоста…');
+          for (const k of Object.keys(buffers)) delete buffers[k];
         }
       }
       break;
@@ -451,8 +399,7 @@ function onMessage(msg) {
     case 'promoted':
       role = 'host';
       buildSongList(); songPicker.hidden = false;
-      playBtn.hidden = !currentSong; syncLabel.hidden = false;
-      showHeaderToggle(false);
+      playBtn.hidden = !currentSong; syncLabel.hidden = false; headerToggle.hidden = true;
       setStatus('Ви тепер хост.');
       if (currentSong) { getCtx(); loadBuffer(currentSong).then(() => { audioReady = true; }).catch(() => {}); }
       break;
@@ -465,8 +412,11 @@ function onMessage(msg) {
 playBtn.addEventListener('click', () => {
   if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host') return;
   getCtx();
-  if (!playing) ws.send(JSON.stringify({ type: 'play', song: currentSong || songs[0] || 'test' }));
-  else ws.send(JSON.stringify({ type: 'stop' }));
+  if (!playing) {
+    ws.send(JSON.stringify({ type: 'play', song: currentSong || songs[0] || 'test' }));
+  } else {
+    ws.send(JSON.stringify({ type: 'stop' }));
+  }
 });
 
 pauseBtn.addEventListener('click', () => {
@@ -481,6 +431,29 @@ syncCheck.addEventListener('change', () => {
     ws.send(JSON.stringify({ type: 'sync_audio', enabled: syncCheck.checked }));
 });
 
+myAudioCheck.addEventListener('change', async () => {
+  myAudioEnabled = myAudioCheck.checked;
+  if (myAudioEnabled) {
+    setHeaderToggleState('loading');
+    getCtx();
+    try {
+      await loadBuffer(currentSong || 'test');
+      audioReady = true;
+      setHeaderToggleState('ready');
+      if (playing && !paused && startTime !== null) scheduleAudio();
+    } catch (err) {
+      setHeaderToggleState('off');
+      myAudioEnabled = false; myAudioCheck.checked = false;
+      setStatus('⚠ ' + err.message);
+    }
+  } else {
+    audioReady = false;
+    setHeaderToggleState('off');
+    stopAudioNode();
+    for (const k of Object.keys(buffers)) delete buffers[k];
+  }
+});
+
 // =============================================================================
 // Playback
 // =============================================================================
@@ -492,17 +465,14 @@ async function onPlay(song) {
     highlightSong(song, true);
   }
   lyricsContainer.hidden = false;
-  resetScroll(); setStatus(''); startAnimation(); startScroll();
+  resetScroll();
+  setStatus(''); startAnimation(); startScroll();
 
   if (role === 'host') {
     if (!buffers[song]) { try { await loadBuffer(song); audioReady = true; } catch (e) { setStatus('⚠ ' + e.message); return; } }
-    await resyncAndPlay(5);
-  } else if (syncAudioEnabled && clientJoined && !getMuted()) {
-    if (!buffers[song]) {
-      setStatus('⏳ Завантаження…');
-      try { await loadBuffer(song); audioReady = true; setStatus(''); } catch (e) { return; }
-    }
-    await resyncAndPlay(5);
+    scheduleAudio();
+  } else if (syncAudioEnabled && myAudioEnabled && audioReady) {
+    scheduleAudio();
   }
 }
 
@@ -512,10 +482,10 @@ function onPause() {
   else setStatus('Хост поставив на паузу…');
 }
 
-async function onResume(song) {
+function onResume(song) {
   paused = false; setStatus(''); startAnimation(); startScroll(); requestWakeLock();
-  if (role === 'host') { pauseBtn.textContent = '⏸ Пауза'; await resyncAndPlay(5); }
-  else if (syncAudioEnabled && clientJoined && audioReady && !getMuted()) await resyncAndPlay(5);
+  if (role === 'host') { pauseBtn.textContent = '⏸ Пауза'; scheduleAudio(); }
+  else if (syncAudioEnabled && myAudioEnabled && audioReady) scheduleAudio();
 }
 
 function onStop() {
@@ -523,11 +493,13 @@ function onStop() {
   stopAudioNode(); releaseWakeLock(); stopAnimation(); stopScroll(); clearHighlights(); resetScroll();
   if (role === 'host') {
     playBtn.textContent = '▶ Грати'; pauseBtn.hidden = true;
-    highlightSong(currentSong, false); audioReady = false;
+    highlightSong(currentSong, false);
+    audioReady = false;
     if (currentSong) loadBuffer(currentSong).then(() => { audioReady = true; }).catch(() => {});
     setStatus('Зупинено. Виберіть пісню та натисніть «Грати».');
   } else {
-    audioReady = false; setStatus('Очікування хоста…');
+    audioReady = false;
+    setStatus(myAudioEnabled ? '✅ Готовий до наступної пісні…' : 'Очікування хоста…');
   }
 }
 
@@ -538,7 +510,8 @@ async function loadLyrics(song) {
   try {
     const res = await fetch('/songs/' + song + '.json');
     if (!res.ok) { lyricsEl.innerHTML = ''; lyrics = []; return; }
-    lyrics = await res.json(); renderWords(); resetScroll();
+    lyrics = await res.json(); renderWords();
+    resetScroll();
   } catch { lyricsEl.innerHTML = ''; lyrics = []; }
 }
 
@@ -552,60 +525,34 @@ function renderWords() {
 }
 
 // =============================================================================
-// Animation + Scroll — єдиний RAF loop
+// Animation + Scroll
 // =============================================================================
 function startAnimation() {
   stopAnimation();
   (function tick() {
-    if (!playing || paused || startTime === null) {
-      animFrame = requestAnimationFrame(tick);
-      return;
-    }
+    if (!playing || paused || startTime === null) return;
     const t = (serverNow() - startTime) / 1000;
-
-    // Підсвічування слів
     highlight(t);
-
-    // Прокрутка — оновлюємо ціль і рухаємо
-    const activeSpan = lyricsEl ? lyricsEl.querySelector('.word.active') : null;
-    if (activeSpan && lyricsContainer) {
-      const containerH = lyricsContainer.clientHeight;
-      const wordTop    = activeSpan.offsetTop;
-      const wordInView = wordTop - currentScrollY;
-      // Коли слово перейшло 30% висоти — починаємо рухати
-      if (wordInView > containerH * 0.30) {
-        targetScrollY = Math.max(0, wordTop - containerH * 0.70);
-      }
-    }
-
-    // Плавний рух до цілі
-    const diff = targetScrollY - currentScrollY;
-    if (diff > 0.3) {
-      let speed;
-      if      (diff > 150) speed = 0.020;
-      else if (diff > 60)  speed = 0.007;
-      else                 speed = 0.003;
-      currentScrollY += diff * speed;
-      if (lyricsEl) lyricsEl.style.transform = `translateY(${-currentScrollY}px)`;
-    }
-
+    updateScroll();
     animFrame = requestAnimationFrame(tick);
   })();
 }
-function stopAnimation() {
-  if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
-}
+function stopAnimation() { if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; } }
 
 function highlight(t) {
   document.querySelectorAll('.word').forEach((s, i) => {
     const w = lyrics[i];
-    s.classList.toggle('active', t >= w.start && t < w.end);
-    s.classList.toggle('done',   t >= w.end && !(t >= w.start && t < w.end));
+    const active = t >= w.start && t < w.end;
+    const done   = t >= w.end;
+    s.classList.toggle('active', active);
+    s.classList.toggle('done',   done && !active);
   });
 }
+
 function clearHighlights() {
   document.querySelectorAll('.word').forEach(s => s.classList.remove('active','done'));
 }
+
 function setStatus(m) { if (statusEl) statusEl.textContent = m; }
 
 document.addEventListener('click', e => {
