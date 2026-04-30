@@ -1,0 +1,13 @@
+PUT YOUR AUDIO FILE HERE
+========================
+
+Rename your MP3 to  test.mp3  and place it in this folder.
+
+The file must be at least 7 seconds long so all lyrics words
+(up to t=7.0 s) have a chance to highlight.
+
+Any royalty-free MP3 works. Good sources:
+  https://pixabay.com/music/
+  https://freemusicarchive.org/
+
+After adding the file, delete this placeholder.
