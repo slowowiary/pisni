@@ -581,7 +581,7 @@ function onPause() {
   else setStatus('Хост поставив на паузу…');
 }
 
-async async function onResume(song) {
+async function onResume(song) {
   paused = false; setStatus(''); startAnimation(); startScroll(); requestWakeLock();
   if (role === 'host') {
     pauseBtn.textContent = '⏸ Пауза';
