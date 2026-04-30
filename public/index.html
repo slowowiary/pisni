@@ -9,8 +9,8 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      background: #f5f5f5;
-      color: #1a1a1a;
+      background: #f0f4ff;
+      color: #1a1a2e;
       font-family: 'Segoe UI', system-ui, sans-serif;
       min-height: 100dvh;
       display: flex;
@@ -20,7 +20,7 @@
     /* ── ШАПКА ─────────────────────────────────────────────── */
     header {
       background: #fff;
-      border-bottom: 2px solid #e0e0e0;
+      border-bottom: 2px solid #dde3ff;
       padding: 0 2rem;
       height: 60px;
       display: flex;
@@ -29,21 +29,20 @@
       position: sticky;
       top: 0;
       z-index: 100;
-      box-shadow: 0 2px 8px rgba(0,0,0,.06);
+      box-shadow: 0 2px 8px rgba(63,81,181,.08);
     }
     header h1 {
       font-size: 1.3rem;
       font-weight: 700;
-      color: #e91e63;
+      color: #3f51b5;
       letter-spacing: .05em;
     }
 
+    /* Динамік учасника в шапці */
     #header-audio-toggle {
       display: flex; align-items: center; gap: .4rem;
-      cursor: pointer;
-      padding: .35rem .7rem;
-      border: 2px solid #ddd;
-      border-radius: 8px;
+      cursor: pointer; padding: .35rem .7rem;
+      border: 2px solid #ddd; border-radius: 8px;
       background: #fafafa;
       transition: border-color .2s, background .2s;
       user-select: none;
@@ -54,6 +53,10 @@
     #header-audio-toggle.ready   { border-color: #4caf50; background: #e8f5e9; }
     #header-audio-toggle.ready .speaker { transform: scale(1.1); }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+
+    /* Mute стан */
+    #header-audio-toggle.muted { border-color: #f44336; background: #ffebee; }
+    #header-audio-toggle.muted .speaker::after { content: ''; }
 
     /* ── ОСНОВНИЙ КОНТЕНТ ───────────────────────────────────── */
     main {
@@ -71,62 +74,70 @@
     #status { font-size: .9rem; color: #888; min-height: 1.3em; text-align: center; }
 
     #room-url {
-      background: #fff; border: 1px solid #ddd; border-radius: 8px;
-      padding: .55rem 1rem; font-size: .85rem; color: #1565c0;
+      background: #fff; border: 1px solid #c5cae9; border-radius: 8px;
+      padding: .55rem 1rem; font-size: .85rem; color: #3f51b5;
       word-break: break-all; cursor: pointer; width: 100%; text-align: center;
+      transition: border-color .15s;
     }
-    #room-url:hover { border-color: #1565c0; }
+    #room-url:hover { border-color: #3f51b5; }
     #room-url-label { font-size: .75rem; color: #999; margin-bottom: -.6rem; }
 
     /* ── Кнопки ─────────────────────────────────────────────── */
     .btn-row { display: flex; gap: .8rem; align-items: center; justify-content: center; flex-wrap: wrap; }
+
     button {
-      background: #e91e63; color: #fff; border: none;
+      background: #3f51b5; color: #fff; border: none;
       padding: .75rem 2.2rem; font-size: 1rem; font-weight: 600;
       border-radius: 8px; cursor: pointer;
       transition: background .15s, transform .1s;
     }
-    button:hover  { background: #c2185b; transform: translateY(-1px); }
+    button:hover  { background: #303f9f; transform: translateY(-1px); }
     button:active { transform: translateY(0); }
     button:disabled { background: #bbb; cursor: not-allowed; transform: none; }
-    #pause-btn { background: #757575; padding: .75rem 1.6rem; }
-    #pause-btn:hover { background: #616161; }
+
+    #pause-btn  { background: #5c6bc0; padding: .75rem 1.6rem; }
+    #pause-btn:hover { background: #3949ab; }
+
+    /* Кнопка «Зайти» для клієнта — велика */
+    #join-btn {
+      font-size: 1.2rem;
+      padding: 1.1rem 3.5rem;
+      background: #3f51b5;
+      border-radius: 12px;
+      letter-spacing: .05em;
+    }
+    #join-btn:hover { background: #303f9f; }
 
     /* Галочка хоста */
     #sync-audio-label {
       display: flex; align-items: center; gap: .6rem;
       cursor: pointer; padding: .55rem 1.1rem;
-      border: 2px solid #ddd; border-radius: 8px;
+      border: 2px solid #c5cae9; border-radius: 8px;
       background: #fff; font-size: .9rem; color: #555;
       transition: border-color .15s, background .15s;
       user-select: none;
     }
-    #sync-audio-label:hover { border-color: #e91e63; }
-    #sync-audio-label.on { border-color: #e91e63; background: #fce4ec; color: #c2185b; font-weight: 600; }
-    #sync-audio-label input { accent-color: #e91e63; width: 1rem; height: 1rem; cursor: pointer; }
+    #sync-audio-label:hover { border-color: #3f51b5; }
+    #sync-audio-label.on { border-color: #3f51b5; background: #e8eaf6; color: #3f51b5; font-weight: 600; }
+    #sync-audio-label input { accent-color: #3f51b5; width: 1rem; height: 1rem; cursor: pointer; }
 
     /* ── БЛОК СУБТИТРІВ ─────────────────────────────────────── */
     #lyrics-container {
       width: 100%;
       max-width: 720px;
-      height: 260px;           /* фіксована висота — решта прокручується */
-      overflow: hidden;        /* ховаємо скролбар */
+      height: 340px;
+      overflow: hidden;
       position: relative;
       background: #fff;
-      border: 1px solid #e0e0e0;
+      border: 1px solid #dde3ff;
       border-radius: 12px;
-      padding: 1rem 1.5rem;
+      padding: 1.2rem 1.8rem;
     }
-
-    /* Fade зверху та знизу для плавності */
     #lyrics-container::before,
     #lyrics-container::after {
       content: '';
-      position: absolute;
-      left: 0; right: 0;
-      height: 40px;
-      pointer-events: none;
-      z-index: 2;
+      position: absolute; left: 0; right: 0; height: 50px;
+      pointer-events: none; z-index: 2;
     }
     #lyrics-container::before { top: 0;    background: linear-gradient(#fff, transparent); }
     #lyrics-container::after  { bottom: 0; background: linear-gradient(transparent, #fff); }
@@ -139,25 +150,17 @@
       will-change: transform;
     }
 
-    .word {
-      display: inline-block;
-      color: #999;           /* темніший сірий */
-      transition: color .08s;
-    }
+    .word { display: inline-block; color: #999; transition: color .08s; }
     .word.done   { color: #666; }
     .word.active { color: #e91e63; font-weight: 700; }
 
     /* ── СПИСОК ПІСЕНЬ ──────────────────────────────────────── */
     #song-picker {
-      width: 100%;
-      background: #fff;
-      border: 1px solid #ddd;
-      border-radius: 10px;
-      overflow: hidden;
+      width: 100%; background: #fff;
+      border: 1px solid #dde3ff; border-radius: 10px; overflow: hidden;
     }
     #song-picker-title {
-      padding: .6rem 1rem;
-      font-size: .75rem; color: #999;
+      padding: .6rem 1rem; font-size: .75rem; color: #999;
       border-bottom: 1px solid #f0f0f0;
       text-transform: uppercase; letter-spacing: .05em;
     }
@@ -169,19 +172,28 @@
       transition: background .1s; font-size: .95rem;
     }
     #song-list li:last-child { border-bottom: none; }
-    #song-list li:hover { background: #fce4ec; }
-    #song-list li.active { background: #fce4ec; color: #c2185b; font-weight: 600; }
-    #song-list li .num  { color: #bbb; font-size: .8rem; min-width: 1.8rem; }
-    #song-list li .name { flex: 1; }
+    #song-list li:hover  { background: #e8eaf6; }
+    #song-list li.active { background: #e8eaf6; color: #3f51b5; font-weight: 600; }
+    #song-list li .num   { color: #bbb; font-size: .8rem; min-width: 1.8rem; }
+    #song-list li .name  { flex: 1; }
     #song-list li .playing-icon { animation: bounce .5s infinite alternate; }
     @keyframes bounce { from{transform:scaleY(.8)} to{transform:scaleY(1.2)} }
 
-    /* Домашня сторінка */
-    #home-view { display: flex; flex-direction: column; align-items: center; gap: 1rem; padding: 3rem 0; }
+    /* Екран очікування клієнта */
+    #join-screen {
+      display: flex; flex-direction: column; align-items: center;
+      gap: 1.5rem; padding: 2rem 1rem; text-align: center;
+    }
+    #join-screen h2 { font-size: 1.4rem; color: #3f51b5; }
+    #join-screen p  { color: #666; font-size: .95rem; max-width: 340px; }
 
-    /* ── ПІДВАЛ ──────────────────────────────────────────────── */
+    #home-view {
+      display: flex; flex-direction: column; align-items: center;
+      gap: 1rem; padding: 3rem 0;
+    }
+
     footer {
-      background: #fff; border-top: 1px solid #e0e0e0;
+      background: #fff; border-top: 1px solid #dde3ff;
       padding: 1rem 2rem; text-align: center;
       font-size: .8rem; color: #bbb;
     }
@@ -190,7 +202,7 @@
 <body>
 
   <header>
-    <h1>🎤</h1>
+    <h1>🎤 Зміст роки підзні</h1>
     <label id="header-audio-toggle" hidden title="Грати музику на моєму пристрої">
       <input type="checkbox" id="my-audio-check">
       <span class="speaker">🔇</span>
@@ -198,34 +210,43 @@
   </header>
 
   <main>
+    <!-- Головна -->
     <div id="home-view" hidden>
       <button id="create-btn" style="font-size:1.1rem;padding:1rem 3rem">🎵 Створити кімнату</button>
     </div>
 
+    <!-- Екран входу клієнта -->
+    <div id="join-screen" hidden>
+      <h2>🎤 Вас запрошують до кімнати</h2>
+      <p>Натисніть кнопку нижче, щоб приєднатися та дозволити відтворення музики</p>
+      <label id="mute-label" style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.9rem;color:#555">
+        <input type="checkbox" id="mute-check" style="width:1.1rem;height:1.1rem;accent-color:#3f51b5">
+        🔇 Беззвучний режим
+      </label>
+      <button id="join-btn">🎵 Зайти</button>
+    </div>
+
+    <!-- Кімната -->
     <div id="room-view" hidden style="width:100%;display:flex;flex-direction:column;align-items:center;gap:1.2rem">
 
       <p id="room-url-label">Поділіться посиланням з друзями</p>
       <div id="room-url" title="Натисніть, щоб скопіювати"></div>
       <div id="status"></div>
 
-      <!-- Кнопки (хост) -->
       <div class="btn-row">
         <button id="play-btn"  hidden>▶ Грати</button>
         <button id="pause-btn" hidden>⏸ Пауза</button>
       </div>
 
-      <!-- Галочка хоста -->
       <label id="sync-audio-label" hidden>
         <input type="checkbox" id="sync-audio-check">
         📻 Грати музику на всіх пристроях
       </label>
 
-      <!-- Блок субтитрів -->
       <div id="lyrics-container" hidden>
         <div id="lyrics"></div>
       </div>
 
-      <!-- Список пісень (хост) -->
       <div id="song-picker" hidden>
         <div id="song-picker-title">Список пісень</div>
         <ul id="song-list"></ul>
