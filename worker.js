@@ -35,8 +35,10 @@ export default {
         const stub = env.KARAOKE_ROOM.get(env.KARAOKE_ROOM.idFromName(m[1]));
         return stub.fetch(request);
       }
+      // SPA: /room/:id → повертаємо index.html
       return env.ASSETS.fetch(new Request(new URL('/', url.origin).toString()));
     }
+    // Всі інші запити — роздаємо статичні файли (jpg, mp3, тощо)
     return env.ASSETS.fetch(request);
   },
 };
