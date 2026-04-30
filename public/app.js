@@ -681,9 +681,10 @@ function renderWords() {
       lyricsEl.appendChild(br);
     }
     const s = document.createElement('span');
-    s.textContent = e.word;
-    s.className   = 'word';
-    s.dataset.i   = i;        // зберігаємо індекс для швидкого доступу
+    s.textContent      = e.word;
+    s.className        = 'word';
+    s.dataset.i        = i;
+    s.dataset.word     = e.word; // для ::after pseudo-element
     lyricsEl.appendChild(s);
     lyricsEl.appendChild(document.createTextNode(' '));
   });
