@@ -4,40 +4,43 @@
 
 // ── CONFIGURE THIS after deploying the worker ─────────────────────────────────
 const WORKER_URL = 'https://karaoke-worker.YOUR-SUBDOMAIN.workers.dev';
+
+// If your GitHub Pages site lives at  https://user.github.io/repo-name/
+// set BASE_PATH to '/repo-name'.  For a custom domain leave it ''.
+const BASE_PATH = '';
 // ─────────────────────────────────────────────────────────────────────────────
 
 'use strict';
 
 // ── State ────────────────────────────────────────────────────────────────────
-let ws        = null;
-let role      = null;   // 'host' | 'participant'
-let offset    = 0;      // serverTime – clientTime  (ms)
-let startTime = null;   // server timestamp (ms) when playback began
-let playing   = false;
-let lyrics    = [];     // [{ word, start, end }, ...]
-let animFrame = null;
-let roomId    = null;
+let ws         = null;
+let role       = null;   // 'host' | 'participant'
+let offset     = 0;      // serverTime – clientTime  (ms)
+let startTime  = null;   // server timestamp (ms) at which playback began
+let playing    = false;
+let lyrics     = [];     // [{ word, start, end }, ...]
+let animFrame  = null;
+let roomId     = null;
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
-const homeView  = document.getElementById('home-view');
-const roomView  = document.getElementById('room-view');
-const createBtn = document.getElementById('create-btn');
-const playBtn   = document.getElementById('play-btn');
-const roomUrlEl = document.getElementById('room-url');
-const lyricsEl  = document.getElementById('lyrics');
-const statusEl  = document.getElementById('status');
+const homeView      = document.getElementById('home-view');
+const roomView      = document.getElementById('room-view');
+const createBtn     = document.getElementById('create-btn');
+const playBtn       = document.getElementById('play-btn');
+const roomUrlEl     = document.getElementById('room-url');
+const lyricsEl      = document.getElementById('lyrics');
+const statusEl      = document.getElementById('status');
 
-// Audio plays ONLY on the host device — never touched on participant side
-const audio   = new Audio();
+// Audio only ever plays on the host device
+const audio = new Audio();
 audio.preload = 'auto';
 
 // =============================================================================
 // Boot
 // =============================================================================
 async function init() {
-  // SPA redirect: Cloudflare Pages / GitHub Pages 404.html encodes the
-  // original path into ?p=  so index.html can restore it via replaceState.
-  const params     = new URLSearchParams(location.search);
+  // GitHub-Pages SPA redirect: index.html?p=/room/abc  →  restore the path
+  const params = new URLSearchParams(location.search);
   const redirected = params.get('p');
   if (redirected) {
     history.replaceState(null, '', redirected);
@@ -52,6 +55,7 @@ async function init() {
 }
 
 function parseRoomFromPath() {
+  // Works with any base path prefix: /repo-name/room/abc
   const m = location.pathname.match(/\/room\/([a-z0-9]+)/i);
   return m ? m[1] : null;
 }
@@ -60,14 +64,14 @@ function parseRoomFromPath() {
 // Create room
 // =============================================================================
 createBtn.addEventListener('click', async () => {
-  createBtn.disabled    = true;
-  createBtn.textContent = 'Creating…';
+  createBtn.disabled     = true;
+  createBtn.textContent  = 'Creating…';
   try {
     const res = await fetch(`${WORKER_URL}/create`);
-    if (!res.ok) throw new Error(`Server responded ${res.status}`);
-    const { roomId: id } = await res.json();
-    history.pushState(null, '', `/room/${id}`);
-    await enterRoom(id);
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    history.pushState(null, '', `${BASE_PATH}/room/${data.roomId}`);
+    await enterRoom(data.roomId);
   } catch (err) {
     createBtn.disabled    = false;
     createBtn.textContent = 'Create Room';
@@ -83,6 +87,7 @@ async function enterRoom(id) {
   homeView.hidden = true;
   roomView.hidden = false;
 
+  // Show the shareable link immediately
   roomUrlEl.textContent = location.href;
 
   setStatus('Syncing clock…');
@@ -96,14 +101,14 @@ async function enterRoom(id) {
 }
 
 // =============================================================================
-// NTP-style clock sync
+// NTP-style clock sync  (HTTP round-trip before WebSocket opens)
 // =============================================================================
 async function syncTime(id) {
   const t0 = Date.now();
   const res = await fetch(`${WORKER_URL}/room/${id}/time`);
   const { serverTime } = await res.json();
   const t1 = Date.now();
-  // Assume symmetric RTT; server time sits at the midpoint
+  // Assume symmetric RTT; server time at the midpoint of the trip
   offset = serverTime - Math.round((t0 + t1) / 2);
 }
 
@@ -112,16 +117,15 @@ function serverNow() {
 }
 
 // =============================================================================
-// WebSocket
+// WebSocket connection
 // =============================================================================
 function connectWS(id) {
-  const wsUrl = WORKER_URL.replace('https', 'wss').replace('http', 'ws')
-              + '/room/' + id + '/ws';
-
-  ws = new WebSocket(wsUrl);
+  const proto = WORKER_URL.startsWith('https') ? 'wss' : 'ws';
+  const base  = WORKER_URL.replace(/^https?/, proto);
+  ws = new WebSocket(`${base}/room/${id}/ws`);
 
   ws.addEventListener('open', () => {
-    // Refine clock offset every 10 s while connected
+    // Refine offset every 10 s while connected
     setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'ping', clientTime: Date.now() }));
@@ -151,7 +155,7 @@ function onMessage(msg) {
       role   = msg.role;
       offset = msg.serverTime - Date.now(); // coarse initial offset
       if (role === 'host') {
-        audio.src           = '/songs/test.mp3';
+        audio.src           = 'songs/test.mp3';
         playBtn.hidden      = false;
         playBtn.textContent = 'Play';
         setStatus('You are the host – press Play when ready.');
@@ -161,6 +165,7 @@ function onMessage(msg) {
       break;
 
     case 'pong': {
+      // Refine offset with RTT correction
       const rtt = Date.now() - msg.clientTime;
       offset = msg.serverTime - (msg.clientTime + Math.round(rtt / 2));
       break;
@@ -176,7 +181,7 @@ function onMessage(msg) {
 
     case 'promoted':
       role                = 'host';
-      audio.src           = '/songs/test.mp3';
+      audio.src           = 'songs/test.mp3';
       playBtn.hidden      = false;
       playBtn.textContent = 'Play';
       setStatus('You are now the host.');
@@ -185,7 +190,7 @@ function onMessage(msg) {
 }
 
 // =============================================================================
-// Playback
+// Playback control
 // =============================================================================
 playBtn.addEventListener('click', () => {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -200,12 +205,12 @@ function beginPlayback(srvStart, song) {
   startTime = srvStart;
   playing   = true;
 
-  // Audio only on host
   if (role === 'host') {
-    const elapsed       = (serverNow() - startTime) / 1000;
-    audio.currentTime   = Math.max(0, elapsed);
+    // Seek to wherever we are in the song (handles late-joiners who become host)
+    const elapsed = (serverNow() - startTime) / 1000;
+    audio.currentTime = Math.max(0, elapsed);
     audio.play().catch(() => {
-      setStatus('Tap anywhere to allow audio playback.');
+      setStatus('Click anywhere to allow audio playback.');
       document.addEventListener('click', () => audio.play(), { once: true });
     });
     playBtn.textContent = 'Stop';
@@ -221,7 +226,7 @@ function stopPlayback() {
 
   if (role === 'host') {
     audio.pause();
-    audio.currentTime   = 0;
+    audio.currentTime = 0;
     playBtn.textContent = 'Play';
     setStatus('Stopped – press Play to start again.');
   } else {
@@ -237,12 +242,11 @@ function stopPlayback() {
 // =============================================================================
 async function loadLyrics(song) {
   try {
-    const res = await fetch(`/songs/${song}.json`);
-    if (!res.ok) throw new Error(res.status);
+    const res = await fetch(`songs/${song}.json`);
     lyrics = await res.json();
     renderWords();
-  } catch (err) {
-    lyricsEl.textContent = '⚠ Could not load lyrics: ' + err.message;
+  } catch {
+    lyricsEl.textContent = '⚠ Could not load lyrics file.';
   }
 }
 
@@ -259,13 +263,14 @@ function renderWords() {
 }
 
 // =============================================================================
-// Animation loop – highlights the current word every frame
+// Animation loop – highlights the current word
 // =============================================================================
 function startAnimation() {
   stopAnimation();
   function tick() {
     if (!playing || startTime === null) return;
-    highlight((serverNow() - startTime) / 1000);
+    const elapsed = (serverNow() - startTime) / 1000;
+    highlight(elapsed);
     animFrame = requestAnimationFrame(tick);
   }
   animFrame = requestAnimationFrame(tick);
@@ -280,7 +285,7 @@ function stopAnimation() {
 
 function highlight(elapsed) {
   document.querySelectorAll('.word').forEach((span, i) => {
-    const w        = lyrics[i];
+    const w = lyrics[i];
     const isActive = elapsed >= w.start && elapsed < w.end;
     const isDone   = elapsed >= w.end;
     span.classList.toggle('active', isActive);
@@ -289,7 +294,9 @@ function highlight(elapsed) {
 }
 
 function clearHighlights() {
-  document.querySelectorAll('.word').forEach(s => s.classList.remove('active', 'done'));
+  document.querySelectorAll('.word').forEach(span => {
+    span.classList.remove('active', 'done');
+  });
 }
 
 // =============================================================================
@@ -299,14 +306,17 @@ function setStatus(msg) {
   statusEl.textContent = msg;
 }
 
-// Click room-url box → copy to clipboard
+// Copy room URL on click
 document.addEventListener('click', e => {
-  if (e.target.id !== 'room-url') return;
-  navigator.clipboard.writeText(e.target.textContent).then(() => {
-    const orig          = e.target.textContent;
-    e.target.textContent = 'Copied!';
-    setTimeout(() => { e.target.textContent = orig; }, 1500);
-  });
+  if (e.target.id === 'room-url') {
+    navigator.clipboard.writeText(e.target.textContent).then(() => {
+      e.target.dataset.orig = e.target.textContent;
+      e.target.textContent  = 'Copied!';
+      setTimeout(() => {
+        e.target.textContent = e.target.dataset.orig;
+      }, 1500);
+    });
+  }
 });
 
 // =============================================================================

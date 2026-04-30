@@ -4,10 +4,10 @@
   <meta charset="UTF-8">
   <title>Redirecting…</title>
   <script>
-    // GitHub Pages SPA trick:
-    // When a user navigates directly to /room/abc, GitHub Pages serves this
-    // 404.html instead.  We encode the path into ?p= and redirect to index.html,
-    // which reads the param and restores the real URL via history.replaceState.
+    // SPA redirect trick for Cloudflare Pages / GitHub Pages:
+    // A direct visit to /room/abc hits this 404.html instead of index.html.
+    // We encode the full path into ?p= and bounce to the root, where
+    // index.html reads it back and restores the URL via history.replaceState.
     var path = location.pathname + location.search;
     location.replace(location.origin + '/?p=' + encodeURIComponent(path));
   </script>
