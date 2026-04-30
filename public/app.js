@@ -1,40 +1,138 @@
 // =============================================================================
-// Karaoke – frontend
+// Karaoke – frontend  (Web Audio API для ідеальної синхронізації)
 // =============================================================================
 
 const WORKER_URL = 'https://pisni.slovo-wiry.workers.dev';
 
 'use strict';
 
-let ws        = null;
-let role      = null;
-let offset    = 0;
-let startTime = null;
-let playing   = false;
-let lyrics    = [];
-let animFrame = null;
-let roomId    = null;
+// ── State ────────────────────────────────────────────────────────────────────
+let ws            = null;
+let role          = null;
+let playing       = false;
+let lyrics        = [];
+let animFrame     = null;
+let roomId        = null;
 
-const homeView  = document.getElementById('home-view');
-const roomView  = document.getElementById('room-view');
-const createBtn = document.getElementById('create-btn');
-const playBtn   = document.getElementById('play-btn');
-const roomUrlEl = document.getElementById('room-url');
-const lyricsEl  = document.getElementById('lyrics');
-const statusEl  = document.getElementById('status');
+// ── Clock sync state ─────────────────────────────────────────────────────────
+// Зберігаємо кілька замірів RTT і беремо медіану для точнішого offset
+let clockSamples  = [];   // [{offset, rtt}, ...]
+let offset        = 0;    // serverTime – Date.now()  (ms, float)
 
-const audio   = new Audio();
-audio.preload = 'auto';
+// ── Playback state ───────────────────────────────────────────────────────────
+let startTime     = null; // server ms коли почалось відтворення
+let songBuffer    = null; // AudioBuffer завантаженої пісні
+let sourceNode    = null; // поточний AudioBufferSourceNode
+let audioCtx      = null; // Web Audio context
+
+// ── DOM refs ─────────────────────────────────────────────────────────────────
+const homeView       = document.getElementById('home-view');
+const roomView       = document.getElementById('room-view');
+const createBtn      = document.getElementById('create-btn');
+const playBtn        = document.getElementById('play-btn');
+const roomUrlEl      = document.getElementById('room-url');
+const lyricsEl       = document.getElementById('lyrics');
+const statusEl       = document.getElementById('status');
+const syncAudioCheck = document.getElementById('sync-audio-check');
+
+// =============================================================================
+// Web Audio – ініціалізація (треба після user gesture)
+// =============================================================================
+function getAudioCtx() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+async function loadSongBuffer(song) {
+  if (songBuffer) return songBuffer;
+  setStatus('Loading audio…');
+  const ctx = getAudioCtx();
+  const res = await fetch(`/songs/${song}.mp3`);
+  if (!res.ok) throw new Error('MP3 not found');
+  const arrayBuf = await res.arrayBuffer();
+  songBuffer = await ctx.decodeAudioData(arrayBuf);
+  return songBuffer;
+}
+
+// =============================================================================
+// Точне відтворення через Web Audio API
+// Запускаємо AudioBufferSourceNode з точним contextTime
+// =============================================================================
+function playAudioSynced() {
+  if (!songBuffer) return;
+  stopAudioNode();
+
+  const ctx     = getAudioCtx();
+  const now_srv = serverNow();                          // поточний серверний час (ms)
+  const elapsed = (now_srv - startTime) / 1000;         // скільки секунд пройшло
+
+  if (elapsed >= songBuffer.duration) return;           // пісня вже закінчилась
+
+  const src = ctx.createBufferSource();
+  src.buffer = songBuffer;
+  src.connect(ctx.destination);
+
+  // ctx.currentTime — це точний таймер Web Audio (мікросекундна точність)
+  // Ми хочемо почати з позиції elapsed, але враховуємо що ctx.currentTime
+  // рухається незалежно від Date.now()
+  const offset_sec = Math.max(0, elapsed);
+  src.start(ctx.currentTime, offset_sec);  // старт зараз, з позиції offset_sec
+  sourceNode = src;
+
+  src.onended = () => { sourceNode = null; };
+}
+
+function stopAudioNode() {
+  if (sourceNode) {
+    try { sourceNode.stop(); } catch {}
+    sourceNode = null;
+  }
+}
+
+// =============================================================================
+// NTP-style clock sync – багатосемплова медіана
+// =============================================================================
+function serverNow() {
+  return Date.now() + offset;
+}
+
+function addClockSample(serverTime, clientSendTime) {
+  const rtt        = Date.now() - clientSendTime;
+  const sampleOffset = serverTime - (clientSendTime + rtt / 2);
+  clockSamples.push({ offset: sampleOffset, rtt });
+  // Тримаємо останні 8 замірів
+  if (clockSamples.length > 8) clockSamples.shift();
+  // Беремо зважене середнє: зразки з меншим RTT мають більшу вагу
+  const minRtt = Math.min(...clockSamples.map(s => s.rtt));
+  let weightSum = 0, offsetSum = 0;
+  for (const s of clockSamples) {
+    const w = minRtt / s.rtt;   // чим менший RTT тим більша вага
+    weightSum  += w;
+    offsetSum  += s.offset * w;
+  }
+  offset = offsetSum / weightSum;
+}
+
+async function syncTime(id) {
+  // Робимо 5 замірів підряд для кращої точності
+  for (let i = 0; i < 5; i++) {
+    const t0  = Date.now();
+    const res = await fetch(`${WORKER_URL}/room/${id}/time`);
+    const { serverTime } = await res.json();
+    addClockSample(serverTime, t0);
+    if (i < 4) await new Promise(r => setTimeout(r, 50));
+  }
+}
 
 // =============================================================================
 // Persistent client identity
 // =============================================================================
 function getMyClientId() {
   let id = localStorage.getItem('karaoke_client_id');
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem('karaoke_client_id', id);
-  }
+  if (!id) { id = crypto.randomUUID(); localStorage.setItem('karaoke_client_id', id); }
   return id;
 }
 
@@ -42,16 +140,12 @@ function getMyClientId() {
 // Boot
 // =============================================================================
 async function init() {
-  const params     = new URLSearchParams(location.search);
+  const params = new URLSearchParams(location.search);
   const redirected = params.get('p');
   if (redirected) history.replaceState(null, '', redirected);
 
   const id = parseRoomFromPath();
-  if (id) {
-    await enterRoom(id);
-  } else {
-    homeView.hidden = false;
-  }
+  if (id) { await enterRoom(id); } else { homeView.hidden = false; }
 }
 
 function parseRoomFromPath() {
@@ -66,7 +160,6 @@ createBtn.addEventListener('click', async () => {
   createBtn.disabled    = true;
   createBtn.textContent = 'Creating…';
   try {
-    // Завжди генеруємо новий clientId при створенні кімнати
     const clientId = crypto.randomUUID();
     localStorage.setItem('karaoke_client_id', clientId);
     const res = await fetch(`${WORKER_URL}/create?clientId=${encodeURIComponent(clientId)}`);
@@ -101,35 +194,20 @@ async function enterRoom(id) {
 }
 
 // =============================================================================
-// Clock sync
-// =============================================================================
-async function syncTime(id) {
-  const t0 = Date.now();
-  const res = await fetch(`${WORKER_URL}/room/${id}/time`);
-  const { serverTime } = await res.json();
-  const t1 = Date.now();
-  offset = serverTime - Math.round((t0 + t1) / 2);
-}
-
-function serverNow() { return Date.now() + offset; }
-
-// =============================================================================
 // WebSocket
 // =============================================================================
 function connectWS(id) {
   const wsUrl = WORKER_URL.replace('https', 'wss').replace('http', 'ws')
               + '/room/' + id + '/ws';
-
   ws = new WebSocket(wsUrl);
 
   ws.addEventListener('open', () => {
-    // Надсилаємо наш постійний clientId — сервер перевірить чи ми хост
     ws.send(JSON.stringify({ type: 'hello', clientId: getMyClientId() }));
-
+    // Уточнюємо offset кожні 3 секунди через WS ping
     setInterval(() => {
       if (ws.readyState === WebSocket.OPEN)
         ws.send(JSON.stringify({ type: 'ping', clientTime: Date.now() }));
-    }, 10_000);
+    }, 3000);
   });
 
   ws.addEventListener('message', e => {
@@ -151,25 +229,30 @@ function onMessage(msg) {
   switch (msg.type) {
     case 'joined':
       role   = msg.role;
-      offset = msg.serverTime - Date.now();
+      // Грубий початковий offset
+      addClockSample(msg.serverTime, Date.now() - 50);
       if (role === 'host') {
-        audio.src           = '/songs/test.mp3';
         playBtn.hidden      = false;
         playBtn.textContent = 'Play';
         setStatus('You are the host – press Play when ready.');
+        // Хост попередньо завантажує аудіо
+        loadSongBuffer('test').catch(() => {});
       } else {
         setStatus('Waiting for the host to start…');
       }
       break;
 
-    case 'pong': {
-      const rtt = Date.now() - msg.clientTime;
-      offset = msg.serverTime - (msg.clientTime + Math.round(rtt / 2));
+    case 'pong':
+      addClockSample(msg.serverTime, msg.clientTime);
+      // Якщо грає — коригуємо позицію аудіо якщо потрібно
+      if (playing && (role === 'host' || syncAudioCheck.checked)) {
+        resyncAudio();
+      }
       break;
-    }
 
     case 'play':
-      beginPlayback(msg.startTime, msg.song);
+      startTime = msg.startTime;
+      beginPlayback(msg.song);
       break;
 
     case 'stop':
@@ -178,11 +261,31 @@ function onMessage(msg) {
 
     case 'promoted':
       role                = 'host';
-      audio.src           = '/songs/test.mp3';
       playBtn.hidden      = false;
       playBtn.textContent = 'Play';
       setStatus('You are now the host.');
+      loadSongBuffer('test').catch(() => {});
       break;
+  }
+}
+
+// =============================================================================
+// Resync – викликається після кожного pong для корекції дрейфу
+// =============================================================================
+function resyncAudio() {
+  if (!sourceNode || !songBuffer || startTime === null) return;
+  const ctx      = getAudioCtx();
+  const expected = (serverNow() - startTime) / 1000;
+  // Отримати поточну позицію складніше з AudioBufferSourceNode —
+  // використовуємо ctx.currentTime мінус час старту ноди
+  // Якщо розбіжність > 150ms — перезапускаємо з правильної позиції
+  if (expected >= 0 && expected < songBuffer.duration) {
+    // Порівнюємо через збережений startContextTime
+    const actualPos = ctx.currentTime - sourceNode._startedAt + sourceNode._offset;
+    const drift = Math.abs(actualPos - expected);
+    if (drift > 0.15) {
+      playAudioSynced(); // перезапуск з точної позиції
+    }
   }
 }
 
@@ -191,31 +294,45 @@ function onMessage(msg) {
 // =============================================================================
 playBtn.addEventListener('click', () => {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  // User gesture — розблоковуємо AudioContext
+  getAudioCtx();
   ws.send(JSON.stringify({ type: playing ? 'stop' : 'play', song: 'test' }));
 });
 
-function beginPlayback(srvStart, song) {
-  startTime = srvStart;
-  playing   = true;
-  if (role === 'host') {
-    const elapsed     = (serverNow() - startTime) / 1000;
-    audio.currentTime = Math.max(0, elapsed);
-    audio.play().catch(() => {
-      setStatus('Tap anywhere to allow audio playback.');
-      document.addEventListener('click', () => audio.play(), { once: true });
-    });
-    playBtn.textContent = 'Stop';
+// Галочка — якщо увімкнена під час відтворення, починаємо грати зараз
+syncAudioCheck.addEventListener('change', () => {
+  if (syncAudioCheck.checked && playing && startTime !== null) {
+    getAudioCtx();
+    loadSongBuffer('test').then(() => playAudioSynced()).catch(console.error);
+  } else if (!syncAudioCheck.checked) {
+    stopAudioNode();
   }
+});
+
+async function beginPlayback(song) {
+  playing = true;
+  if (role === 'host') playBtn.textContent = 'Stop';
   setStatus('');
   startAnimation();
+
+  const shouldPlayAudio = role === 'host' || syncAudioCheck.checked;
+  if (!shouldPlayAudio) return;
+
+  try {
+    await loadSongBuffer(song);
+    playAudioSynced();
+  } catch (err) {
+    setStatus('⚠ Audio: ' + err.message);
+  }
 }
 
 function stopPlayback() {
   playing   = false;
   startTime = null;
+  stopAudioNode();
+  songBuffer = null; // очищаємо буфер щоб наступний play знову завантажив
+
   if (role === 'host') {
-    audio.pause();
-    audio.currentTime   = 0;
     playBtn.textContent = 'Play';
     setStatus('Stopped – press Play to start again.');
   } else {
@@ -223,6 +340,28 @@ function stopPlayback() {
   }
   stopAnimation();
   clearHighlights();
+}
+
+// =============================================================================
+// Перевизначаємо playAudioSynced щоб зберігати метадані для resync
+// =============================================================================
+const _origPlayAudioSynced = playAudioSynced;
+// Патчимо щоб зберігати _startedAt та _offset
+function playAudioSynced() {
+  if (!songBuffer) return;
+  stopAudioNode();
+  const ctx     = getAudioCtx();
+  const elapsed = Math.max(0, (serverNow() - startTime) / 1000);
+  if (elapsed >= songBuffer.duration) return;
+
+  const src = ctx.createBufferSource();
+  src.buffer  = songBuffer;
+  src.connect(ctx.destination);
+  src._startedAt = ctx.currentTime;  // коли стартували в AudioContext часі
+  src._offset    = elapsed;           // з якої позиції
+  src.start(ctx.currentTime, elapsed);
+  sourceNode = src;
+  src.onended = () => { if (sourceNode === src) sourceNode = null; };
 }
 
 // =============================================================================
@@ -242,7 +381,7 @@ async function loadLyrics(song) {
 function renderWords() {
   lyricsEl.innerHTML = '';
   lyrics.forEach((entry, i) => {
-    const span       = document.createElement('span');
+    const span = document.createElement('span');
     span.textContent = entry.word;
     span.className   = 'word';
     span.dataset.i   = i;
