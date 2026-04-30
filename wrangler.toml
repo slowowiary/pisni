@@ -5,6 +5,8 @@ compatibility_date = "2024-09-23"
 [assets]
 directory = "./public"
 binding   = "ASSETS"
+# Тільки API і room маршрути йдуть через worker
+# Всі інші (jpg, mp3, json, html) роздаються напряму з assets
 run_worker_first = ["/api/*", "/room/*", "/create"]
 
 [build]
