@@ -42,13 +42,20 @@ const statusEl        = document.getElementById('status');
 // AudioContext — iOS вимагає створення і resume в user gesture
 // =============================================================================
 function unlockAudio() {
-  // Викликати ТІЛЬКИ в user gesture (click/touchend)
+  // iOS Safari вимагає: створити AudioContext + програти тихий звук
+  // в ТОМУ САМОМУ обробнику кліку
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     gainNode  = audioCtx.createGain();
     gainNode.gain.value = isMuted ? 0 : 1;
     gainNode.connect(audioCtx.destination);
   }
+  // Програємо 0.001с порожній буфер — це розблоковує iOS
+  const silentBuf = audioCtx.createBuffer(1, 1, 22050);
+  const silent    = audioCtx.createBufferSource();
+  silent.buffer   = silentBuf;
+  silent.connect(audioCtx.destination);
+  silent.start(0);
   if (audioCtx.state === 'suspended') audioCtx.resume();
   audioUnlocked = true;
 }
