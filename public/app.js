@@ -391,7 +391,7 @@ syncCheck.addEventListener('change', () => {
 });
 
 // Вибір пісні хостом — завантажуємо буфер заздалегідь
-songSelect.addEventListener('change', () => {
+if (songSelect) songSelect.addEventListener('change', () => {
   const song = songSelect.value;
   if (song !== currentSong) {
     currentSong = song;
