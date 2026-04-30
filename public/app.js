@@ -488,7 +488,12 @@ async function handleMsg(msg) {
       startTime        = msg.startTime;
       paused           = false;
       syncAudioEnabled = msg.syncAudio || false;
-      if (msg.song !== currentSong) { currentSong = msg.song; await loadLyrics(msg.song); }
+      if (msg.song !== currentSong) {
+        // Пісня змінилась — скидаємо буфер
+        clearBuffer();
+        currentSong = msg.song;
+        await loadLyrics(msg.song);
+      }
       await doPlay(msg.song);
       break;
     }
@@ -681,10 +686,9 @@ function renderWords() {
       lyricsEl.appendChild(br);
     }
     const s = document.createElement('span');
-    s.textContent      = e.word;
-    s.className        = 'word';
-    s.dataset.i        = i;
-    s.dataset.word     = e.word; // для ::after pseudo-element
+    s.textContent = e.word;
+    s.className   = 'word';
+    s.dataset.i   = i;        // зберігаємо індекс для швидкого доступу
     lyricsEl.appendChild(s);
     lyricsEl.appendChild(document.createTextNode(' '));
   });
