@@ -45,7 +45,10 @@ const statusEl        = document.getElementById('status');
 function getCtx() {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (!gainNode) {
     gainNode = audioCtx.createGain();
+    gainNode.gain.value = isMuted ? 0 : 1;
     gainNode.connect(audioCtx.destination);
   }
   if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -75,8 +78,9 @@ function scheduleAudio() {
   const ctxWhen = Math.max(ctx.currentTime + 0.005, ctx.currentTime + msUntil / 1000);
   const src     = ctx.createBufferSource();
   src.buffer = buf; src._ctxWhen = ctxWhen; src._songOffset = off;
-  src.connect(gainNode);
+  getCtx(); // гарантуємо gainNode існує
   gainNode.gain.value = isMuted ? 0 : 1;
+  src.connect(gainNode);
   src.start(ctxWhen, off);
   sourceNode = src;
   src.onended = () => {
@@ -283,9 +287,17 @@ async function init() {
   const id = parseRoomFromPath();
   if (id) {
     roomId = id;
-    // Перевіряємо чи це хост ще до підключення WS
-    // Показуємо join screen для всіх — хост буде визначений після WS
-    showJoinOrEnter(id);
+    // Якщо цей пристрій створював цю кімнату — входимо одразу як хост
+    const myHostRoom = localStorage.getItem('karaoke_host_room');
+    if (myHostRoom === id) {
+      getCtx();
+      clientJoined = true;
+      myAudioEnabled = true;
+      await enterRoom(id);
+    } else {
+      // Клієнт — показуємо join screen
+      showJoinOrEnter(id);
+    }
   } else {
     homeView.hidden = false;
   }
@@ -321,6 +333,7 @@ createBtn.addEventListener('click', async () => {
     if (!res.ok) throw new Error(res.status);
     const { roomId: id } = await res.json();
     history.pushState(null, '', '/room/' + id);
+    localStorage.setItem('karaoke_host_room', id);
     getCtx();
     clientJoined = true;
     myAudioEnabled = true;
@@ -425,7 +438,7 @@ function onMessage(msg) {
           headerToggle.hidden = false;
           updateSpeakerUI();
           // Якщо не заглушений — завантажуємо і грає
-          if (!isMuted && clientJoined && currentSong && !buffers[currentSong]) {
+          if (!isMuted && clientJoined && myAudioEnabled && currentSong && !buffers[currentSong]) {
             getCtx();
             setStatus('⏳ Завантаження аудіо…');
             loadBuffer(currentSong)
@@ -434,7 +447,7 @@ function onMessage(msg) {
                 if (playing && !paused && startTime !== null) scheduleAudio();
               })
               .catch(() => setStatus('⚠ Помилка'));
-          } else if (!isMuted && audioReady && playing && !paused && startTime !== null) {
+          } else if (!isMuted && audioReady && myAudioEnabled && playing && !paused && startTime !== null) {
             scheduleAudio();
           }
         } else {
@@ -496,7 +509,7 @@ async function onPlay(song) {
   if (role === 'host') {
     if (!buffers[song]) { try { await loadBuffer(song); audioReady = true; } catch (e) { setStatus('⚠ ' + e.message); return; } }
     scheduleAudio();
-  } else if (syncAudioEnabled && clientJoined && audioReady && !isMuted) {
+  } else if (syncAudioEnabled && clientJoined && myAudioEnabled && audioReady && !isMuted) {
     scheduleAudio();
   }
 }
@@ -510,7 +523,7 @@ function onPause() {
 function onResume(song) {
   paused = false; setStatus(''); startAnimation(); startScroll(); requestWakeLock();
   if (role === 'host') { pauseBtn.textContent = '⏸ Пауза'; scheduleAudio(); }
-  else if (syncAudioEnabled && clientJoined && audioReady && !isMuted) scheduleAudio();
+  else if (syncAudioEnabled && clientJoined && myAudioEnabled && audioReady && !isMuted) scheduleAudio();
 }
 
 function onStop() {
