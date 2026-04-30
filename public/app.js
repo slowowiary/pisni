@@ -245,7 +245,7 @@ function connectWS(id) {
         ws.send(JSON.stringify({ type: 'ping', clientTime: Date.now() }));
     }, 8000);
   });
-  ws.addEventListener('message', e => { try { onMessage(JSON.parse(e.data)); } catch {} });
+  ws.addEventListener('message', e => { try { onMessage(JSON.parse(e.data)); } catch(err) { console.error('onMessage error:', err); } });
   ws.addEventListener('close',   () => { setStatus('Reconnecting…'); setTimeout(() => connectWS(id), 2000); });
   ws.addEventListener('error',   () => setStatus('WebSocket error.'));
 }
@@ -268,8 +268,7 @@ function onMessage(msg) {
       role = msg.role;
       addSample(msg.serverTime, Date.now() - 50);
       if (role === 'host') {
-        populateSongSelect();
-        songPicker.hidden   = false;
+        if (songPicker) { populateSongSelect(); songPicker.hidden = false; }
         playBtn.hidden      = false;
         syncLabel.hidden    = false;
         myAudioLabel.hidden = true;
