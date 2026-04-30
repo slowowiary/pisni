@@ -167,9 +167,10 @@
       text-align: center;
       will-change: transform;
     }
-    .word { display: inline-block; color: #999; transition: color .08s; }
+    .word { display: inline-block; color: #999; transition: color .08s; font-weight: 400; }
+    .word::before { content: attr(data-word); display: block; font-weight: 700; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
     .word.done   { color: #666; }
-    .word.active { color: #e91e63; font-weight: 700; }
+    .word.active { color: #e91e63; text-shadow: 0 0 0.4px #e91e63, 0 0 0.4px #e91e63; }
 
     /* ── Список пісень ──────────────────────────────────────── */
     #song-picker {
