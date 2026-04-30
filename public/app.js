@@ -83,7 +83,6 @@ function unlockAudio() {
 async function ensureBuffer(song) {
   if (audioBuffer && currentSong === song) return audioBuffer;
   initAudio();
-  // Структура: songs/<назва_пісні>/<назва_пісні>.mp3
   const res = await fetch('/songs/' + song + '/' + song + '.mp3');
   if (!res.ok) throw new Error('MP3 not found: ' + song);
   const arr = await res.arrayBuffer();
@@ -666,7 +665,6 @@ syncCheck?.addEventListener('change', () => {
 // =============================================================================
 async function loadLyrics(song) {
   try {
-    // Структура: songs/<назва_пісні>/<назва_пісні>.json
     const res = await fetch('/songs/' + song + '/' + song + '.json');
     if (!res.ok) { lyricsEl.innerHTML = ''; lyrics = []; return; }
     lyrics = await res.json(); renderWords(); cacheSpans(); resetScroll();
