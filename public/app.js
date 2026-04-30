@@ -66,7 +66,9 @@ createBtn.addEventListener('click', async () => {
   createBtn.disabled    = true;
   createBtn.textContent = 'Creating…';
   try {
-    const clientId = getMyClientId();
+    // Завжди генеруємо новий clientId при створенні кімнати
+    const clientId = crypto.randomUUID();
+    localStorage.setItem('karaoke_client_id', clientId);
     const res = await fetch(`${WORKER_URL}/create?clientId=${encodeURIComponent(clientId)}`);
     if (!res.ok) throw new Error(`Server responded ${res.status}`);
     const { roomId: id } = await res.json();
