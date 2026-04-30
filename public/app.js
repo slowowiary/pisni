@@ -373,6 +373,15 @@ function parseRoom() {
   return m ? m[1] : null;
 }
 
+// Коли хост закриває вкладку — надсилаємо stop через sendBeacon
+// sendBeacon працює навіть при закритті браузера
+window.addEventListener('beforeunload', () => {
+  if (role !== 'host' || !roomId) return;
+  const cid = localStorage.getItem('karaoke_client_id') || '';
+  const url = `${WORKER_URL}/room/${roomId}/host-stop?clientId=${encodeURIComponent(cid)}`;
+  navigator.sendBeacon(url);
+});
+
 // =============================================================================
 // Join / Create
 // =============================================================================
