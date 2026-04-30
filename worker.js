@@ -25,7 +25,7 @@ export default {
     const m = url.pathname.match(/^\/room\/([a-z0-9]+)(\/.*)?$/i);
     if (m) {
       const sub = m[2] || '';
-      if (sub === '/time' || sub === '/ws') {
+      if (sub === '/time' || sub === '/ws' || sub === '/state') {
         const stub = env.KARAOKE_ROOM.get(env.KARAOKE_ROOM.idFromName(m[1]));
         return stub.fetch(request);
       }
@@ -93,6 +93,9 @@ export class KaraokeRoom {
       return cors(json({ ok: true }));
     }
     if (url.pathname.endsWith('/time')) return cors(json({ serverTime: Date.now() }));
+    if (url.pathname.endsWith('/state')) {
+      return cors(json({ syncAudio: this.syncAudio }));
+    }
     if (url.pathname.endsWith('/ws')) {
       if (request.headers.get('Upgrade') !== 'websocket')
         return new Response('Expected WebSocket', { status: 426 });
