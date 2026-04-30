@@ -1,163 +1,174 @@
 // =============================================================================
-// Karaoke – frontend
+// Karaoke – frontend v3
 // =============================================================================
 const WORKER_URL = 'https://pisni.slovo-wiry.workers.dev';
 'use strict';
 
-let ws = null, role = null, playing = false, paused = false;
-let lyrics = [], animFrame = null, roomId = null;
-let startTime = null, pauseTime = null;
-let currentSong  = null;
-let buffers      = {};
-let sourceNode   = null, audioCtx = null, gainNode = null;
-let syncAudioEnabled = false;
-let audioUnlocked    = false;
-let audioReady       = false;
-let isMuted          = false;
-let wakeLock         = null;
-let songs            = [];
-let scrollAnimFrame  = null;
-let currentScrollY   = 0;
-let targetScrollY    = 0;
+// ── Стан ─────────────────────────────────────────────────────────────────────
+let ws             = null;
+let role           = null;   // 'host' | 'participant'
+let roomId         = null;
 
-// DOM
-const homeView        = document.getElementById('home-view');
-const joinScreen      = document.getElementById('join-screen');
-const joinBtn         = document.getElementById('join-btn');
-const roomView        = document.getElementById('room-view');
-const createBtn       = document.getElementById('create-btn');
-const playBtn         = document.getElementById('play-btn');
-const pauseBtn        = document.getElementById('pause-btn');
-const syncLabel       = document.getElementById('sync-audio-label');
-const syncCheck       = document.getElementById('sync-audio-check');
-const headerToggle    = document.getElementById('header-audio-toggle');
-const songPicker      = document.getElementById('song-picker');
-const songList        = document.getElementById('song-list');
-const lyricsContainer = document.getElementById('lyrics-container');
-const lyricsEl        = document.getElementById('lyrics');
-const roomUrlEl       = document.getElementById('room-url');
-const statusEl        = document.getElementById('status');
+// Відтворення
+let playing        = false;
+let paused         = false;
+let startTime      = null;   // серверний ms старту (з +3с offset від worker)
+let currentSong    = null;
+
+// Аудіо
+let audioCtx       = null;
+let gainNode       = null;
+let sourceNode     = null;
+let audioBuffer    = null;   // завантажений буфер ТІЛЬКИ поточної пісні
+let audioUnlocked  = false;  // user gesture відбувся
+let isMuted        = false;
+
+// Sync
+let syncAudioEnabled = false; // хост увімкнув "грати на всіх"
+let clockSamples   = [];
+let offset         = 0;
+
+// UI
+let lyrics         = [];
+let animFrame      = null;
+let scrollFrame    = null;
+let currentScrollY = 0;
+let targetScrollY  = 0;
+let songs          = [];
+let wakeLock       = null;
+
+// ── DOM ───────────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const homeView     = $('home-view');
+const joinScreen   = $('join-screen');
+const joinBtn      = $('join-btn');
+const roomView     = $('room-view');
+const createBtn    = $('create-btn');
+const playBtn      = $('play-btn');
+const pauseBtn     = $('pause-btn');
+const syncLabel    = $('sync-audio-label');
+const syncCheck    = $('sync-audio-check');
+const headerToggle = $('header-audio-toggle');
+const songPicker   = $('song-picker');
+const songListEl   = $('song-list');
+const lyricsCont   = $('lyrics-container');
+const lyricsEl     = $('lyrics');
+const roomUrlEl    = $('room-url');
+const statusEl     = $('status');
 
 // =============================================================================
 // AudioContext
 // =============================================================================
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  gainNode  = audioCtx.createGain();
+  gainNode.gain.value = isMuted ? 0 : 1;
+  gainNode.connect(audioCtx.destination);
+}
+
 function unlockAudio() {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    gainNode  = audioCtx.createGain();
-    gainNode.gain.value = isMuted ? 0 : 1;
-    gainNode.connect(audioCtx.destination);
-  }
-  const silentBuf = audioCtx.createBuffer(1, 1, 22050);
-  const silent    = audioCtx.createBufferSource();
-  silent.buffer   = silentBuf;
-  silent.connect(audioCtx.destination);
-  silent.start(0);
+  initAudio();
+  // Тихий буфер — розблоковує iOS
+  const buf = audioCtx.createBuffer(1, 1, 22050);
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(audioCtx.destination);
+  src.start(0);
   if (audioCtx.state === 'suspended') audioCtx.resume();
   audioUnlocked = true;
 }
 
-function getCtx() {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    gainNode  = audioCtx.createGain();
-    gainNode.gain.value = isMuted ? 0 : 1;
-    gainNode.connect(audioCtx.destination);
-  }
-  if (audioCtx.state === 'suspended') audioCtx.resume();
-  return audioCtx;
-}
-
-async function loadBuffer(song) {
-  if (buffers[song]) return buffers[song];
-  getCtx();
+// Завантажує MP3 тільки якщо ще не завантажений
+async function ensureBuffer(song) {
+  if (audioBuffer && currentSong === song) return audioBuffer;
+  initAudio();
   const res = await fetch('/songs/' + song + '.mp3');
-  if (!res.ok) throw new Error('MP3 not found');
-  const arrayBuf = await res.arrayBuffer();
-  buffers[song] = await new Promise((resolve, reject) => {
-    audioCtx.decodeAudioData(arrayBuf, resolve, reject);
-  });
-  return buffers[song];
+  if (!res.ok) throw new Error('MP3 not found: ' + song);
+  const arr = await res.arrayBuffer();
+  audioBuffer = await new Promise((ok, fail) => audioCtx.decodeAudioData(arr, ok, fail));
+  return audioBuffer;
+}
+
+function clearBuffer() {
+  audioBuffer = null;
 }
 
 // =============================================================================
-// Clock sync
-// =============================================================================
-let clockSamples = [], offset = 0;
-function serverNow() { return Date.now() + offset; }
-
-function addSample(serverTime, t0) {
-  const rtt = Date.now() - t0;
-  clockSamples.push({ offset: serverTime - (t0 + rtt / 2), rtt });
-  if (clockSamples.length > 16) clockSamples.shift();
-  const sorted  = [...clockSamples].sort((a, b) => a.rtt - b.rtt);
-  const trimmed = sorted.slice(0, Math.max(1, Math.floor(sorted.length * 0.7)));
-  const min = trimmed[0].rtt;
-  let wSum = 0, oSum = 0;
-  for (const s of trimmed) { const w = min / s.rtt; wSum += w; oSum += s.offset * w; }
-  offset = oSum / wSum;
-}
-
-// Початкова синхронізація при вході — 8 замірів
-async function syncTime(id) {
-  for (let i = 0; i < 8; i++) {
-    const t0  = Date.now();
-    const res = await fetch(`${WORKER_URL}/room/${id}/time`);
-    addSample((await res.json()).serverTime, t0);
-    if (i < 7) await new Promise(r => setTimeout(r, 20));
-  }
-}
-
-// Швидка ресинхронізація перед запуском аудіо — 3 паралельних запити
-// Повертає оновлений offset і одразу викликає scheduleAudio
-async function resyncThenPlay() {
-  // 3 паралельних HTTP запити — швидко і точно
-  await Promise.all([1,2,3].map(async () => {
-    const t0  = Date.now();
-    try {
-      const res = await fetch(`${WORKER_URL}/room/${roomId}/time`);
-      addSample((await res.json()).serverTime, t0);
-    } catch {}
-  }));
-  scheduleAudio();
-}
-
-// =============================================================================
-// Playback
+// Планування відтворення
 // =============================================================================
 async function scheduleAudio() {
-  const buf = buffers[currentSong];
-  if (!buf || startTime === null || !audioCtx) return;
-  stopAudioNode();
+  if (!audioBuffer || startTime === null || !audioCtx) return;
+  stopNode();
   if (audioCtx.state !== 'running') {
     try { await audioCtx.resume(); } catch {}
   }
   const msUntil = startTime - serverNow();
   const elapsed = Math.max(0, -msUntil / 1000);
-  const off     = Math.min(elapsed, buf.duration - 0.01);
-  if (off >= buf.duration) return;
-  const ctxWhen = Math.max(audioCtx.currentTime + 0.005,
-                           audioCtx.currentTime + msUntil / 1000);
+  const off     = Math.min(elapsed, audioBuffer.duration - 0.01);
+  if (off >= audioBuffer.duration) return;
+  const when = Math.max(audioCtx.currentTime + 0.005,
+                        audioCtx.currentTime + msUntil / 1000);
   const src = audioCtx.createBufferSource();
-  src.buffer = buf; src._ctxWhen = ctxWhen; src._songOffset = off;
+  src.buffer = audioBuffer;
+  src._when  = when;
+  src._off   = off;
   gainNode.gain.value = isMuted ? 0 : 1;
   src.connect(gainNode);
-  src.start(ctxWhen, off);
+  src.start(when, off);
   sourceNode = src;
   src.onended = () => {
-    if (sourceNode === src) { sourceNode = null; if (role === 'host' && playing) onSongEnded(); }
+    if (sourceNode === src) { sourceNode = null; if (role === 'host' && playing) songEnded(); }
   };
 }
 
-function stopAudioNode() {
+function stopNode() {
   if (sourceNode) { try { sourceNode.stop(); } catch {} sourceNode = null; }
 }
 
-function onSongEnded() {
+function songEnded() {
   playing = false; paused = false; startTime = null;
-  playBtn.textContent = '▶ Грати'; pauseBtn.hidden = true;
+  playBtn.hidden = false;
+  playBtn.textContent = '▶ Грати';
+  pauseBtn.hidden = true;
   setStatus('Пісня закінчилась. Виберіть наступну.');
-  stopAnimation(); clearHighlights(); highlightSong(currentSong, false);
+  stopAnim(); clearHL(); highlightSong(currentSong, false);
+}
+
+// =============================================================================
+// Синхронізація годинника
+// =============================================================================
+function serverNow() { return Date.now() + offset; }
+
+function addSample(srvTime, t0) {
+  const rtt = Date.now() - t0;
+  clockSamples.push({ off: srvTime - (t0 + rtt / 2), rtt });
+  if (clockSamples.length > 12) clockSamples.shift();
+  const sorted  = [...clockSamples].sort((a, b) => a.rtt - b.rtt);
+  const use     = sorted.slice(0, Math.max(1, Math.floor(sorted.length * 0.7)));
+  const minRtt  = use[0].rtt;
+  let ws = 0, os = 0;
+  for (const s of use) { const w = minRtt / s.rtt; ws += w; os += s.off * w; }
+  offset = os / ws;
+}
+
+// Початкова синхронізація при вході
+async function syncOnEntry(id) {
+  for (let i = 0; i < 8; i++) {
+    const t0  = Date.now();
+    const res = await fetch(`${WORKER_URL}/room/${id}/time`).catch(() => null);
+    if (res?.ok) addSample((await res.json()).serverTime, t0);
+    if (i < 7) await new Promise(r => setTimeout(r, 20));
+  }
+}
+
+// Ресинхронізація перед запуском — 3 паралельних запити
+async function resync() {
+  await Promise.all([0,1,2].map(async () => {
+    const t0  = Date.now();
+    const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
+    if (res?.ok) addSample((await res.json()).serverTime, t0);
+  }));
 }
 
 // =============================================================================
@@ -165,10 +176,7 @@ function onSongEnded() {
 // =============================================================================
 async function requestWakeLock() {
   if ('wakeLock' in navigator) {
-    try {
-      wakeLock = await navigator.wakeLock.request('screen');
-      wakeLock.addEventListener('release', () => { wakeLock = null; });
-    } catch {}
+    try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
   }
 }
 function releaseWakeLock() { if (wakeLock) { wakeLock.release(); wakeLock = null; } }
@@ -187,27 +195,23 @@ function startScroll() {
       currentScrollY += diff * 0.04;
       if (lyricsEl) lyricsEl.style.transform = `translateY(${-currentScrollY}px)`;
     }
-    scrollAnimFrame = requestAnimationFrame(tick);
+    scrollFrame = requestAnimationFrame(tick);
   })();
 }
-function stopScroll() {
-  if (scrollAnimFrame) { cancelAnimationFrame(scrollAnimFrame); scrollAnimFrame = null; }
-}
+function stopScroll() { if (scrollFrame) { cancelAnimationFrame(scrollFrame); scrollFrame = null; } }
 function resetScroll() {
   currentScrollY = 0; targetScrollY = 0;
   if (lyricsEl) lyricsEl.style.transform = 'translateY(0)';
 }
 function updateScroll() {
-  if (!lyricsContainer || !lyricsEl) return;
-  const activeSpan = lyricsEl.querySelector('.word.active');
-  if (!activeSpan) return;
-  const containerH = lyricsContainer.clientHeight;
-  const wordTop    = activeSpan.offsetTop;
-  targetScrollY    = Math.max(0, wordTop - containerH * 0.4);
+  if (!lyricsCont || !lyricsEl) return;
+  const active = lyricsEl.querySelector('.word.active');
+  if (!active) return;
+  targetScrollY = Math.max(0, active.offsetTop - lyricsCont.clientHeight * 0.4);
 }
 
 // =============================================================================
-// Song list
+// Список пісень
 // =============================================================================
 async function loadSongList() {
   try {
@@ -217,15 +221,15 @@ async function loadSongList() {
 }
 
 function buildSongList() {
-  if (!songList) return;
-  songList.innerHTML = '';
+  if (!songListEl) return;
+  songListEl.innerHTML = '';
   songs.forEach((s, i) => {
     const li   = document.createElement('li');
     const name = s.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
     li.dataset.song = s;
-    li.innerHTML    = `<span class="num">${i + 1}</span><span class="name">${name}</span>`;
+    li.innerHTML    = `<span class="num">${i+1}</span><span class="name">${name}</span>`;
     li.addEventListener('click', () => selectSong(s));
-    songList.appendChild(li);
+    songListEl.appendChild(li);
   });
 }
 
@@ -235,36 +239,40 @@ function selectSong(song) {
   highlightSong(song, false);
   loadLyrics(song);
   if (role === 'host') {
-    if (!playing) playBtn.hidden = false;
-    for (const k of Object.keys(buffers)) { if (k !== song) delete buffers[k]; }
-    getCtx();
-    // Завантажуємо буфер заздалегідь — щоб play був миттєвим
-    loadBuffer(song).then(() => { audioReady = true; }).catch(console.error);
+    if (!playing) { playBtn.hidden = false; }
+    // Завантажуємо буфер тільки обраної пісні
+    clearBuffer();
+    ensureBuffer(song).then(() => {}).catch(console.error);
   }
 }
 
 function highlightSong(song, isPlaying) {
-  if (!songList) return;
-  songList.querySelectorAll('li').forEach(li => {
+  if (!songListEl) return;
+  songListEl.querySelectorAll('li').forEach(li => {
     const active = li.dataset.song === song;
     li.classList.toggle('active', active);
-    const ex = li.querySelector('.playing-icon');
-    if (ex) ex.remove();
+    li.querySelector('.playing-icon')?.remove();
     if (active && isPlaying) {
-      const icon = document.createElement('span');
-      icon.className = 'playing-icon'; icon.textContent = '🎵';
-      li.appendChild(icon);
+      const ic = document.createElement('span');
+      ic.className = 'playing-icon'; ic.textContent = '🎵';
+      li.appendChild(ic);
     }
   });
 }
 
 // =============================================================================
-// Speaker toggle (клієнт)
+// Динамік (клієнт)
 // =============================================================================
+function setHeaderToggle(show) {
+  if (!headerToggle) return;
+  headerToggle.hidden = !show;
+  if (show) updateSpeakerUI();
+}
+
 function updateSpeakerUI() {
   if (!headerToggle) return;
-  const icon = headerToggle.querySelector('.speaker-icon');
-  if (icon) icon.textContent = isMuted ? '🔇' : '🔊';
+  const ic = headerToggle.querySelector('.speaker-icon');
+  if (ic) ic.textContent = isMuted ? '🔇' : '🔊';
   headerToggle.classList.toggle('muted', isMuted);
 }
 
@@ -273,13 +281,19 @@ if (headerToggle) {
     isMuted = !isMuted;
     if (gainNode) gainNode.gain.value = isMuted ? 0 : 1;
     updateSpeakerUI();
+    // Якщо вмикаємо звук під час відтворення — синхронізуємось
+    if (!isMuted && syncAudioEnabled && audioUnlocked && playing && !paused && startTime !== null) {
+      resync().then(scheduleAudio);
+    } else if (isMuted) {
+      stopNode(); // зупиняємо відтворення
+    }
   });
 }
 
 // =============================================================================
 // Identity
 // =============================================================================
-function getMyClientId() {
+function getClientId() {
   let id = localStorage.getItem('karaoke_client_id');
   if (!id) { id = crypto.randomUUID(); localStorage.setItem('karaoke_client_id', id); }
   return id;
@@ -292,12 +306,12 @@ async function init() {
   const p = new URLSearchParams(location.search).get('p');
   if (p) history.replaceState(null, '', p);
   await loadSongList();
-  const id = parseRoomFromPath();
+  const id = parseRoom();
   if (id) {
     roomId = id;
-    const myHostRoom = localStorage.getItem('karaoke_host_room');
-    if (myHostRoom === id) {
-      getCtx(); audioUnlocked = true;
+    if (localStorage.getItem('karaoke_host_room') === id) {
+      // Хост — входить одразу
+      initAudio(); audioUnlocked = true;
       await enterRoom(id);
     } else {
       joinScreen.hidden = false;
@@ -307,31 +321,34 @@ async function init() {
   }
 }
 
-function parseRoomFromPath() {
+function parseRoom() {
   const m = location.pathname.match(/\/room\/([a-z0-9]+)/i);
   return m ? m[1] : null;
 }
 
+// =============================================================================
+// Join / Create
+// =============================================================================
 if (joinBtn) {
   joinBtn.addEventListener('click', async () => {
-    unlockAudio();
+    unlockAudio(); // USER GESTURE — iOS вимагає тут
     requestWakeLock();
     joinScreen.hidden = true;
     await enterRoom(roomId);
   });
 }
 
-createBtn.addEventListener('click', async () => {
+createBtn?.addEventListener('click', async () => {
   createBtn.disabled = true; createBtn.textContent = 'Створення…';
   try {
-    const clientId = crypto.randomUUID();
-    localStorage.setItem('karaoke_client_id', clientId);
-    const res = await fetch(`${WORKER_URL}/create?clientId=${encodeURIComponent(clientId)}`);
+    const cid = crypto.randomUUID();
+    localStorage.setItem('karaoke_client_id', cid);
+    const res = await fetch(`${WORKER_URL}/create?clientId=${encodeURIComponent(cid)}`);
     if (!res.ok) throw new Error(res.status);
     const { roomId: id } = await res.json();
     localStorage.setItem('karaoke_host_room', id);
     history.pushState(null, '', '/room/' + id);
-    getCtx(); audioUnlocked = true;
+    initAudio(); audioUnlocked = true;
     await enterRoom(id);
   } catch (err) {
     createBtn.disabled = false; createBtn.textContent = '🎵 Створити кімнату';
@@ -343,8 +360,10 @@ async function enterRoom(id) {
   roomId = id;
   homeView.hidden = true; joinScreen.hidden = true; roomView.hidden = false;
   roomUrlEl.textContent = location.href;
-  setStatus('Синхронізація…'); await syncTime(id);
-  setStatus('Підключення…'); connectWS(id);
+  setStatus('Синхронізація…');
+  await syncOnEntry(id);
+  setStatus('Підключення…');
+  connectWS(id);
 }
 
 // =============================================================================
@@ -353,225 +372,230 @@ async function enterRoom(id) {
 function connectWS(id) {
   const url = WORKER_URL.replace('https','wss').replace('http','ws') + '/room/' + id + '/ws';
   ws = new WebSocket(url);
+
   ws.addEventListener('open', () => {
-    ws.send(JSON.stringify({ type: 'hello', clientId: getMyClientId() }));
-    // Ping лише для keepalive — НЕ для синхронізації
+    ws.send(JSON.stringify({ type: 'hello', clientId: getClientId() }));
+    // Keepalive ping — рідко, не для sync
     setInterval(() => {
       if (ws.readyState === WebSocket.OPEN)
         ws.send(JSON.stringify({ type: 'ping', clientTime: Date.now() }));
     }, 20000);
   });
+
   ws.addEventListener('message', e => {
-    try { onMessage(JSON.parse(e.data)); } catch(err) { console.error('onMessage:', err); }
+    try { handleMsg(JSON.parse(e.data)); } catch(err) { console.error(err); }
   });
-  ws.addEventListener('close', () => { setStatus('Перепідключення…'); setTimeout(() => connectWS(id), 2000); });
-  ws.addEventListener('error', () => setStatus('Помилка WebSocket.'));
+
+  ws.addEventListener('close', () => {
+    setStatus('Перепідключення…');
+    setTimeout(() => connectWS(id), 2000);
+  });
 }
 
 // =============================================================================
-// Messages
+// Обробка повідомлень
 // =============================================================================
-function onMessage(msg) {
+async function handleMsg(msg) {
   switch (msg.type) {
 
-    case 'joined':
+    // ── Підключення ──────────────────────────────────────────────────────────
+    case 'joined': {
       role = msg.role;
-      addSample(msg.serverTime, Date.now() - 50);
+      addSample(msg.serverTime, Date.now() - 30);
+
       if (role === 'host') {
         joinScreen.hidden = true;
         buildSongList();
-        songPicker.hidden = false; playBtn.hidden = true;
-        pauseBtn.hidden = true; syncLabel.hidden = false;
-        headerToggle.hidden = true; lyricsContainer.hidden = true;
-        const savedSync = localStorage.getItem('karaoke_sync_audio') === '1';
-        syncCheck.checked = savedSync;
-        syncLabel.classList.toggle('on', savedSync);
-        if (savedSync && ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'sync_audio', enabled: true }));
-        }
+        songPicker.hidden = false;
+        playBtn.hidden = true; pauseBtn.hidden = true;
+        syncLabel.hidden = false; setHeaderToggle(false);
+        lyricsCont.hidden = true;
+        // Відновлюємо стан галочки
+        const saved = localStorage.getItem('karaoke_sync_audio') === '1';
+        syncCheck.checked = saved;
+        syncLabel.classList.toggle('on', saved);
+        syncAudioEnabled = saved;
+        if (saved) ws.send(JSON.stringify({ type: 'sync_audio', enabled: true }));
         setStatus('Виберіть пісню зі списку нижче.');
+
       } else {
+        // Клієнт
         songPicker.hidden = true; playBtn.hidden = true;
         pauseBtn.hidden = true; syncLabel.hidden = true;
-        headerToggle.hidden = true; lyricsContainer.hidden = true;
+        lyricsCont.hidden = true;
         syncAudioEnabled = false;
+        setHeaderToggle(false); // сховано — покажемо тільки через sync_audio
         setStatus('Очікування хоста…');
       }
       break;
+    }
 
     case 'pong':
-      // Тільки keepalive — не використовуємо для sync
+      // Тільки keepalive
       break;
 
-    // ── PLAY ─────────────────────────────────────────────────────────────────
-    // Сервер вже додав +3000ms до startTime — всі мають час підготуватись
-    case 'play':
+    // ── Play ─────────────────────────────────────────────────────────────────
+    // Worker додає +3000ms до startTime — час для завантаження і синхронізації
+    case 'play': {
       startTime        = msg.startTime;
-      pauseTime        = null; paused = false;
+      paused           = false;
       syncAudioEnabled = msg.syncAudio || false;
-      if (msg.song !== currentSong) { currentSong = msg.song; loadLyrics(msg.song); }
-      onPlay(msg.song);
+      if (msg.song !== currentSong) { currentSong = msg.song; await loadLyrics(msg.song); }
+      await doPlay(msg.song);
       break;
+    }
 
-    case 'pause':
-      onPause(); break;
+    // ── Pause ────────────────────────────────────────────────────────────────
+    case 'pause': {
+      paused = true;
+      stopNode();
+      stopAnim(); stopScroll();
+      if (role === 'host') { pauseBtn.textContent = '▶ Продовжити'; setStatus('Пауза.'); }
+      else setStatus('Хост поставив на паузу…');
+      break;
+    }
 
-    // ── RESUME ───────────────────────────────────────────────────────────────
-    // Після паузи: сервер дав новий startTime (+2000ms) — синхронізуємось
-    case 'resume':
+    // ── Resume ───────────────────────────────────────────────────────────────
+    // Worker дає новий startTime (+2000ms) — синхронізуємось перед запуском
+    case 'resume': {
       startTime        = msg.startTime;
-      pauseTime        = null; paused = false;
+      paused           = false;
       syncAudioEnabled = msg.syncAudio || false;
-      onResume(msg.song); break;
+      startAnim(); startScroll(); requestWakeLock();
+      setStatus('');
+      if (role === 'host') { pauseBtn.textContent = '⏸ Пауза'; }
+      if (role === 'host' || (syncAudioEnabled && audioUnlocked && audioBuffer && !isMuted)) {
+        await resync();
+        scheduleAudio();
+      }
+      break;
+    }
 
-    case 'stop':
-      onStop(); break;
+    // ── Stop ─────────────────────────────────────────────────────────────────
+    case 'stop': {
+      playing = false; paused = false; startTime = null;
+      stopNode(); releaseWakeLock();
+      stopAnim(); stopScroll(); clearHL(); resetScroll();
+      if (role === 'host') {
+        playBtn.textContent = '▶ Грати'; pauseBtn.hidden = true;
+        highlightSong(currentSong, false);
+        setStatus('Зупинено. Виберіть пісню та натисніть «Грати».');
+      } else {
+        setStatus('Очікування хоста…');
+      }
+      break;
+    }
 
-    // ── SYNC_AUDIO ────────────────────────────────────────────────────────────
-    // Хост увімкнув "грати на всіх" — завантажуємо і синхронізуємось
-    case 'sync_audio':
+    // ── Sync Audio ───────────────────────────────────────────────────────────
+    // Хост увімкнув/вимкнув "грати на всіх"
+    // Надсилається ТІЛЬКИ учасникам (worker виключає хоста)
+    case 'sync_audio': {
       syncAudioEnabled = msg.enabled;
       if (role === 'host') break;
 
       if (msg.enabled) {
-        headerToggle.hidden = false;
-        updateSpeakerUI();
-        if (isMuted) break;
-        if (currentSong) {
-          const doPlay = () => {
-            if (playing && !paused && startTime !== null) {
-              // Синхронізуємо перед запуском
-              resyncThenPlay();
-            }
-          };
-          if (!buffers[currentSong]) {
+        // Показуємо динамік
+        setHeaderToggle(true);
+
+        if (!isMuted && audioUnlocked && currentSong) {
+          // Завантажуємо буфер якщо нема (тільки якщо грає зараз)
+          if (!audioBuffer) {
             setStatus('⏳ Завантаження…');
-            loadBuffer(currentSong).then(() => {
-              audioReady = true; setStatus('');
-              doPlay();
-            }).catch(e => setStatus('⚠ ' + e.message));
-          } else {
-            audioReady = true;
-            doPlay();
+            try {
+              await ensureBuffer(currentSong);
+              setStatus('');
+            } catch (e) {
+              setStatus('⚠ ' + e.message); break;
+            }
+          }
+          // Якщо зараз відтворення — синхронізуємось і запускаємо
+          if (playing && !paused && startTime !== null) {
+            await resync();
+            scheduleAudio();
           }
         }
       } else {
-        headerToggle.hidden = true;
-        stopAudioNode();
-        audioReady = false;
+        // Хост вимкнув — зупиняємо і ховаємо
+        setHeaderToggle(false);
+        stopNode();
+        clearBuffer(); // звільняємо пам'ять
         setStatus('Очікування хоста…');
       }
       break;
+    }
 
-    case 'promoted':
+    case 'promoted': {
       role = 'host';
       buildSongList(); songPicker.hidden = false;
       playBtn.hidden = !currentSong; syncLabel.hidden = false;
-      headerToggle.hidden = true;
+      setHeaderToggle(false);
       setStatus('Ви тепер хост.');
-      if (currentSong) loadBuffer(currentSong).then(() => { audioReady = true; }).catch(() => {});
       break;
+    }
   }
 }
 
 // =============================================================================
-// Host controls
+// doPlay — головна логіка запуску відтворення
 // =============================================================================
-playBtn.addEventListener('click', () => {
-  if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host') return;
-  getCtx();
-  if (!playing) ws.send(JSON.stringify({ type: 'play', song: currentSong || songs[0] || 'test' }));
-  else ws.send(JSON.stringify({ type: 'stop' }));
-});
-
-pauseBtn.addEventListener('click', () => {
-  if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host' || !playing) return;
-  ws.send(JSON.stringify({ type: paused ? 'resume' : 'pause', song: currentSong }));
-});
-
-syncCheck.addEventListener('change', () => {
-  syncLabel.classList.toggle('on', syncCheck.checked);
-  if (role === 'host' && ws && ws.readyState === WebSocket.OPEN) {
-    localStorage.setItem('karaoke_sync_audio', syncCheck.checked ? '1' : '0');
-    ws.send(JSON.stringify({ type: 'sync_audio', enabled: syncCheck.checked }));
-  }
-});
-
-// =============================================================================
-// Playback handlers
-// =============================================================================
-async function onPlay(song) {
+async function doPlay(song) {
   playing = true; paused = false;
   requestWakeLock();
+
   if (role === 'host') {
     playBtn.hidden = false;
     playBtn.textContent = '⏹ Стоп';
     pauseBtn.hidden = false; pauseBtn.textContent = '⏸ Пауза';
     highlightSong(song, true);
   }
-  lyricsContainer.hidden = false;
-  resetScroll(); setStatus(''); startAnimation(); startScroll();
+
+  lyricsCont.hidden = false;
+  resetScroll(); setStatus(''); startAnim(); startScroll();
 
   if (role === 'host') {
-    // Хост: буфер вже завантажений в selectSong
-    // Якщо раптом нема — завантажуємо
-    if (!buffers[song]) {
-      try { await loadBuffer(song); audioReady = true; }
-      catch (e) { setStatus('⚠ ' + e.message); return; }
+    // Буфер має бути вже завантажений в selectSong
+    // Якщо ні — завантажуємо зараз
+    if (!audioBuffer || currentSong !== song) {
+      try { await ensureBuffer(song); } catch (e) { setStatus('⚠ ' + e.message); return; }
     }
-    // Сервер дав startTime = now+3000ms — у нас є час
-    // Робимо 3 паралельних sync і запускаємо
-    await resyncThenPlay();
+    await resync();
+    scheduleAudio();
 
   } else if (syncAudioEnabled && audioUnlocked && !isMuted) {
-    // Клієнт: завантажуємо буфер якщо нема і синхронізуємось
-    if (!buffers[song]) {
-      try {
-        setStatus('⏳ Завантаження…');
-        await loadBuffer(song);
-        audioReady = true;
-        setStatus('');
-      } catch (e) { return; }
-    } else {
-      audioReady = true;
+    // Клієнт: завантажуємо буфер і синхронізуємось
+    if (!audioBuffer || currentSong !== song) {
+      setStatus('⏳ Завантаження…');
+      try { await ensureBuffer(song); setStatus(''); }
+      catch (e) { setStatus('⚠ ' + e.message); return; }
     }
-    // Синхронізуємось і запускаємо
-    await resyncThenPlay();
+    await resync();
+    scheduleAudio();
   }
+  // Якщо syncAudioEnabled=false — нічого не завантажуємо на клієнт
 }
 
-function onPause() {
-  paused = true; stopAudioNode(); stopAnimation(); stopScroll();
-  if (role === 'host') { pauseBtn.textContent = '▶ Продовжити'; setStatus('Пауза.'); }
-  else setStatus('Хост поставив на паузу…');
-}
+// =============================================================================
+// Контроли хоста
+// =============================================================================
+playBtn?.addEventListener('click', () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host') return;
+  if (!playing) ws.send(JSON.stringify({ type: 'play', song: currentSong || songs[0] || 'test' }));
+  else ws.send(JSON.stringify({ type: 'stop' }));
+});
 
-async function onResume(song) {
-  paused = false; setStatus(''); startAnimation(); startScroll(); requestWakeLock();
-  if (role === 'host') {
-    pauseBtn.textContent = '⏸ Пауза';
-    // Після паузи — обов'язково синхронізуємось
-    await resyncThenPlay();
-  } else if (syncAudioEnabled && audioUnlocked && audioReady && !isMuted) {
-    await resyncThenPlay();
-  }
-}
+pauseBtn?.addEventListener('click', () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host' || !playing) return;
+  ws.send(JSON.stringify({ type: paused ? 'resume' : 'pause', song: currentSong }));
+});
 
-function onStop() {
-  playing = false; paused = false; startTime = null; pauseTime = null;
-  stopAudioNode(); releaseWakeLock();
-  stopAnimation(); stopScroll(); clearHighlights(); resetScroll();
-  audioReady = false;
-  if (role === 'host') {
-    playBtn.textContent = '▶ Грати'; pauseBtn.hidden = true;
-    highlightSong(currentSong, false);
-    // Перезавантажуємо буфер для наступного play
-    if (currentSong) loadBuffer(currentSong).then(() => { audioReady = true; }).catch(() => {});
-    setStatus('Зупинено. Виберіть пісню та натисніть «Грати».');
-  } else {
-    setStatus('Очікування хоста…');
+syncCheck?.addEventListener('change', () => {
+  syncLabel.classList.toggle('on', syncCheck.checked);
+  syncAudioEnabled = syncCheck.checked;
+  if (role === 'host' && ws?.readyState === WebSocket.OPEN) {
+    localStorage.setItem('karaoke_sync_audio', syncCheck.checked ? '1' : '0');
+    ws.send(JSON.stringify({ type: 'sync_audio', enabled: syncCheck.checked }));
   }
-}
+});
 
 // =============================================================================
 // Lyrics
@@ -588,35 +612,33 @@ function renderWords() {
   lyricsEl.innerHTML = '';
   lyrics.forEach((e, i) => {
     const s = document.createElement('span');
-    s.textContent = e.word; s.className = 'word'; s.dataset.i = i;
-    lyricsEl.appendChild(s); lyricsEl.appendChild(document.createTextNode(' '));
+    s.textContent = e.word; s.className = 'word';
+    lyricsEl.appendChild(s);
+    lyricsEl.appendChild(document.createTextNode(' '));
   });
 }
 
 // =============================================================================
 // Animation
 // =============================================================================
-function startAnimation() {
-  stopAnimation();
+function startAnim() {
+  stopAnim();
   (function tick() {
     if (!playing || paused || startTime === null) return;
     const t = (serverNow() - startTime) / 1000;
-    highlight(t); updateScroll();
+    lyrics.forEach((w, i) => {
+      const s = lyricsEl?.children[i * 2];
+      if (!s) return;
+      s.classList.toggle('active', t >= w.start && t < w.end);
+      s.classList.toggle('done',   t >= w.end && !(t >= w.start && t < w.end));
+    });
+    updateScroll();
     animFrame = requestAnimationFrame(tick);
   })();
 }
-function stopAnimation() { if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; } }
+function stopAnim() { if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; } }
+function clearHL() { lyricsEl?.querySelectorAll('.word').forEach(s => s.classList.remove('active','done')); }
 
-function highlight(t) {
-  document.querySelectorAll('.word').forEach((s, i) => {
-    const w = lyrics[i];
-    s.classList.toggle('active', t >= w.start && t < w.end);
-    s.classList.toggle('done',   t >= w.end && !(t >= w.start && t < w.end));
-  });
-}
-function clearHighlights() {
-  document.querySelectorAll('.word').forEach(s => s.classList.remove('active','done'));
-}
 function setStatus(m) { if (statusEl) statusEl.textContent = m; }
 
 document.addEventListener('click', e => {
