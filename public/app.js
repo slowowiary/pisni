@@ -5,26 +5,29 @@ const WORKER_URL = 'https://pisni.slovo-wiry.workers.dev';
 'use strict';
 
 let ws = null, role = null, playing = false, paused = false;
-let syncAudioEnabled = false; // чи хост увімкнув музику на всіх
 let lyrics = [], animFrame = null, roomId = null;
-let startTime = null;    // серверний ms старту
-let pauseTime = null;    // серверний ms паузи
+let startTime = null, pauseTime = null;
 let songBuffer = null, sourceNode = null, audioCtx = null;
+let syncAudioEnabled = false;  // хост увімкнув "грати на всіх"
+let myAudioEnabled   = true;   // цей пристрій хоче грати (особиста галочка)
+let wakeLock = null;
+
+// DOM
+const homeView        = document.getElementById('home-view');
+const roomView        = document.getElementById('room-view');
+const createBtn       = document.getElementById('create-btn');
+const playBtn         = document.getElementById('play-btn');
+const pauseBtn        = document.getElementById('pause-btn');
+const syncCheck       = document.getElementById('sync-audio-check');   // хост: грати на всіх
+const syncLabel       = document.getElementById('sync-audio-label');
+const myAudioCheck    = document.getElementById('my-audio-check');     // особиста галочка
+const myAudioLabel    = document.getElementById('my-audio-label');
+const roomUrlEl       = document.getElementById('room-url');
+const lyricsEl        = document.getElementById('lyrics');
+const statusEl        = document.getElementById('status');
 
 // Clock
 let clockSamples = [], offset = 0;
-
-// DOM
-const homeView       = document.getElementById('home-view');
-const roomView       = document.getElementById('room-view');
-const createBtn      = document.getElementById('create-btn');
-const playBtn        = document.getElementById('play-btn');
-const pauseBtn       = document.getElementById('pause-btn');
-const syncCheck      = document.getElementById('sync-audio-check');
-const syncLabel      = document.getElementById('sync-audio-label');
-const roomUrlEl      = document.getElementById('room-url');
-const lyricsEl       = document.getElementById('lyrics');
-const statusEl       = document.getElementById('status');
 
 // =============================================================================
 // AudioContext
@@ -46,23 +49,19 @@ async function loadSongBuffer(song) {
 // =============================================================================
 // Scheduled playback
 // =============================================================================
-function scheduleAudio(fromPause = false) {
+function scheduleAudio() {
   if (!songBuffer || startTime === null) return;
   stopAudioNode();
   const ctx = getCtx();
 
-  // Скільки секунд вже зіграло до паузи (або від старту)
-  const alreadyPlayed = fromPause && pauseTime !== null
-    ? (pauseTime - startTime) / 1000
-    : (serverNow() - startTime) / 1000;
-
-  const songOffset = Math.max(0, Math.min(alreadyPlayed, songBuffer.duration - 0.01));
-
-  // Якщо startTime в майбутньому — плануємо точно
-  const msUntil = startTime - serverNow();
-  const ctxWhen = msUntil > 0
+  const msUntil    = startTime - serverNow();
+  const elapsed    = -msUntil / 1000;
+  const songOffset = Math.max(0, Math.min(elapsed, songBuffer.duration - 0.01));
+  const ctxWhen    = msUntil > 0
     ? ctx.currentTime + msUntil / 1000
     : ctx.currentTime + 0.005;
+
+  if (songOffset >= songBuffer.duration) return;
 
   const src = ctx.createBufferSource();
   src.buffer = songBuffer;
@@ -85,15 +84,69 @@ function currentSongPos() {
 
 function resyncIfNeeded() {
   if (!playing || paused || startTime === null || !songBuffer) return;
-  if (role !== 'host' && !syncCheck.checked) return;
+  if (!shouldPlayAudio()) return;
   const expected = (serverNow() - startTime) / 1000;
   const actual   = currentSongPos();
   if (actual === null) { scheduleAudio(); return; }
-  if (Math.abs(actual - expected) > 0.04) scheduleAudio(); // 40ms поріг
+  if (Math.abs(actual - expected) > 0.04) scheduleAudio();
+}
+
+// Чи має цей пристрій грати музику
+function shouldPlayAudio() {
+  if (role === 'host') return true;
+  return syncAudioEnabled && myAudioEnabled;
 }
 
 // =============================================================================
-// Clock sync — зважена медіана, відкидаємо викиди
+// Participant audio — з обробкою autoplay policy
+// =============================================================================
+function startParticipantAudio() {
+  if (!shouldPlayAudio()) return;
+
+  const doPlay = () => {
+    getCtx();
+    if (songBuffer) {
+      scheduleAudio();
+    } else {
+      loadSongBuffer('test').then(scheduleAudio).catch(console.error);
+    }
+  };
+
+  if (audioCtx && audioCtx.state === 'running') {
+    doPlay();
+  } else {
+    setStatus('👆 Tap screen to enable audio');
+    const unlock = () => {
+      document.removeEventListener('click',      unlock);
+      document.removeEventListener('touchstart', unlock);
+      setStatus('');
+      doPlay();
+    };
+    document.addEventListener('click',      unlock, { once: true });
+    document.addEventListener('touchstart', unlock, { once: true });
+  }
+}
+
+// =============================================================================
+// Wake Lock
+// =============================================================================
+async function requestWakeLock() {
+  if ('wakeLock' in navigator) {
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } catch {}
+  }
+}
+function releaseWakeLock() {
+  if (wakeLock) { wakeLock.release(); wakeLock = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && playing && !paused) requestWakeLock();
+});
+
+// =============================================================================
+// Clock sync
 // =============================================================================
 function serverNow() { return Date.now() + offset; }
 
@@ -170,15 +223,6 @@ async function enterRoom(id) {
   setStatus('Syncing clock…'); await syncTime(id);
   setStatus('Loading lyrics…'); await loadLyrics('test');
   setStatus('Connecting…'); connectWS(id);
-  // Завантажуємо аудіо буфер після першого кліку (браузер вимагає user gesture)
-  const unlockAudio = () => {
-    document.removeEventListener('click', unlockAudio);
-    document.removeEventListener('touchstart', unlockAudio);
-    getCtx(); // розблоковуємо AudioContext
-    loadSongBuffer('test').catch(() => {});
-  };
-  document.addEventListener('click', unlockAudio, { once: true });
-  document.addEventListener('touchstart', unlockAudio, { once: true });
 }
 
 // =============================================================================
@@ -208,15 +252,17 @@ function onMessage(msg) {
       role = msg.role;
       addSample(msg.serverTime, Date.now() - 50);
       if (role === 'host') {
-        playBtn.hidden  = false;
+        playBtn.hidden   = false;
         syncLabel.hidden = false;
+        // Хост бачить особисту галочку теж (завжди увімкнена і прихована)
+        myAudioLabel.hidden = true;
         setStatus('You are the host.');
-        loadSongBuffer('test').catch(() => {});
+        loadSongBuffer('test').catch(() => {}); // хост завжди завантажує
       } else {
-        // Учасники бачать тільки статус, без кнопок управління
-        playBtn.hidden  = true;
-        pauseBtn.hidden = true;
+        playBtn.hidden   = true;
+        pauseBtn.hidden  = true;
         syncLabel.hidden = true;
+        myAudioLabel.hidden = true; // сховано поки хост не увімкне sync
         setStatus('Waiting for the host to start…');
       }
       break;
@@ -228,8 +274,8 @@ function onMessage(msg) {
 
     case 'play':
       startTime = msg.startTime;
-      pauseTime = null;
-      paused    = false;
+      pauseTime = null; paused = false;
+      syncAudioEnabled = msg.syncAudio || false;
       onPlay(msg.song);
       break;
 
@@ -239,9 +285,9 @@ function onMessage(msg) {
       break;
 
     case 'resume':
-      startTime = msg.startTime; // новий startTime з урахуванням паузи
-      pauseTime = null;
-      paused    = false;
+      startTime = msg.startTime;
+      pauseTime = null; paused = false;
+      syncAudioEnabled = msg.syncAudio || false;
       onResume(msg.song);
       break;
 
@@ -253,12 +299,18 @@ function onMessage(msg) {
       syncAudioEnabled = msg.enabled;
       if (role !== 'host') {
         if (msg.enabled) {
-          // Запускаємо аудіо якщо вже грає
-          if (playing && !paused && startTime !== null) {
+          // Показуємо особисту галочку учаснику
+          myAudioLabel.hidden = false;
+          myAudioEnabled = myAudioCheck.checked; // поточний стан чекбокса
+          if (playing && !paused && startTime !== null && myAudioEnabled) {
+            // Завантажуємо буфер ТІЛЬКИ якщо потрібно (оптимізація)
             startParticipantAudio();
           }
         } else {
+          // Хост вимкнув — зупиняємо і ховаємо
+          myAudioLabel.hidden = true;
           stopAudioNode();
+          songBuffer = null; // звільняємо пам'ять
           setStatus('');
         }
       }
@@ -266,8 +318,9 @@ function onMessage(msg) {
 
     case 'promoted':
       role = 'host';
-      playBtn.hidden  = false;
+      playBtn.hidden   = false;
       syncLabel.hidden = false;
+      myAudioLabel.hidden = true;
       setStatus('You are now the host.');
       loadSongBuffer('test').catch(() => {});
       break;
@@ -280,65 +333,36 @@ function onMessage(msg) {
 playBtn.addEventListener('click', () => {
   if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host') return;
   getCtx();
-  if (!playing) {
-    ws.send(JSON.stringify({ type: 'play', song: 'test' }));
-  } else {
-    ws.send(JSON.stringify({ type: 'stop' }));
-  }
+  ws.send(JSON.stringify({ type: playing ? 'stop' : 'play', song: 'test' }));
 });
 
 pauseBtn.addEventListener('click', () => {
-  if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host') return;
-  if (!playing) return;
-  if (!paused) {
-    ws.send(JSON.stringify({ type: 'pause' }));
-  } else {
-    ws.send(JSON.stringify({ type: 'resume', song: 'test' }));
-  }
+  if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host' || !playing) return;
+  ws.send(JSON.stringify({ type: paused ? 'resume' : 'pause', song: 'test' }));
 });
 
-// Хост змінює галочку → транслюємо всім
+// Хост: галочка "грати на всіх"
 syncCheck.addEventListener('change', () => {
   getCtx();
   if (role === 'host' && ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'sync_audio', enabled: syncCheck.checked }));
   }
-  // Сам хост музику завжди грає (незалежно від галочки)
+});
+
+// Учасник: особиста галочка "грати на моєму пристрої"
+myAudioCheck.addEventListener('change', () => {
+  myAudioEnabled = myAudioCheck.checked;
+  if (myAudioEnabled && playing && !paused && startTime !== null && syncAudioEnabled) {
+    startParticipantAudio();
+  } else if (!myAudioEnabled) {
+    stopAudioNode();
+    songBuffer = null; // звільняємо пам'ять якщо вимкнули
+  }
 });
 
 // =============================================================================
-// Playback handlers
+// Playback
 // =============================================================================
-// =============================================================================
-// Participant audio start — з обробкою autoplay policy
-// =============================================================================
-function startParticipantAudio() {
-  const doPlay = () => {
-    getCtx();
-    if (songBuffer) {
-      scheduleAudio();
-    } else {
-      loadSongBuffer('test').then(scheduleAudio).catch(console.error);
-    }
-  };
-
-  // Якщо AudioContext вже розблокований — стартуємо одразу
-  if (audioCtx && audioCtx.state === 'running') {
-    doPlay();
-  } else {
-    // Потрібен дотик — показуємо підказку
-    setStatus('👆 Tap screen to enable audio');
-    const unlock = () => {
-      document.removeEventListener('click', unlock);
-      document.removeEventListener('touchstart', unlock);
-      setStatus('');
-      doPlay();
-    };
-    document.addEventListener('click', unlock, { once: true });
-    document.addEventListener('touchstart', unlock, { once: true });
-  }
-}
-
 async function onPlay(song) {
   playing = true; paused = false;
   requestWakeLock();
@@ -349,12 +373,12 @@ async function onPlay(song) {
   }
   setStatus('');
   startAnimation();
+
   if (role === 'host') {
     getCtx();
     try { await loadSongBuffer(song); scheduleAudio(); }
     catch (err) { setStatus('⚠ ' + err.message); }
-  } else if (syncAudioEnabled) {
-    // Хост вже увімкнув "play on all" — запускаємо
+  } else if (syncAudioEnabled && myAudioEnabled) {
     startParticipantAudio();
   }
 }
@@ -373,30 +397,33 @@ function onPause() {
 
 async function onResume(song) {
   paused = false;
+  setStatus('');
+  startAnimation();
+  requestWakeLock();
   if (role === 'host') {
     pauseBtn.textContent = 'Pause';
-    setStatus('');
     getCtx();
     try { await loadSongBuffer(song); scheduleAudio(); }
     catch (err) { setStatus('⚠ ' + err.message); }
-  } else if (syncCheck.checked) {
-    getCtx();
-    try { await loadSongBuffer(song); scheduleAudio(); }
-    catch (err) {}
+  } else if (syncAudioEnabled && myAudioEnabled) {
+    // Учасник резюмує — завантажуємо буфер якщо не було
+    startParticipantAudio();
   }
-  setStatus('');
-  startAnimation();
 }
 
 function onStop() {
   playing = false; paused = false; startTime = null; pauseTime = null;
+  syncAudioEnabled = false;
+  stopAudioNode();
+  // Звільняємо буфер у учасників (хост тримає для наступного play)
+  if (role !== 'host') { songBuffer = null; }
   releaseWakeLock();
-  stopAudioNode(); songBuffer = null;
   if (role === 'host') {
     playBtn.textContent = 'Play';
     pauseBtn.hidden     = true;
     setStatus('Stopped.');
   } else {
+    myAudioLabel.hidden = true;
     setStatus('Waiting for the host to start…');
   }
   stopAnimation(); clearHighlights();
@@ -451,32 +478,6 @@ document.addEventListener('click', e => {
     const o = e.target.textContent; e.target.textContent = 'Copied!';
     setTimeout(() => { e.target.textContent = o; }, 1500);
   });
-});
-
-
-// =============================================================================
-// Wake Lock – не дає екрану гаснути під час відтворення
-// =============================================================================
-let wakeLock = null;
-
-async function requestWakeLock() {
-  if ('wakeLock' in navigator) {
-    try {
-      wakeLock = await navigator.wakeLock.request('screen');
-      wakeLock.addEventListener('release', () => { wakeLock = null; });
-    } catch (err) { /* не критично */ }
-  }
-}
-
-function releaseWakeLock() {
-  if (wakeLock) { wakeLock.release(); wakeLock = null; }
-}
-
-// Повторно запитуємо Wake Lock якщо сторінка стала видимою знову
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && playing && !paused) {
-    requestWakeLock();
-  }
 });
 
 init();
