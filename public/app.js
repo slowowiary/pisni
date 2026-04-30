@@ -692,7 +692,8 @@ function renderWords() {
     const s = document.createElement('span');
     s.textContent = e.word;
     s.className   = 'word';
-    s.dataset.i   = i;        // зберігаємо індекс для швидкого доступу
+    s.dataset.i   = i; // зберігаємо індекс для швидкого доступу
+    s.dataset.word = e.word;
     lyricsEl.appendChild(s);
     lyricsEl.appendChild(document.createTextNode(' '));
   });
