@@ -235,7 +235,7 @@ function startPeriodicSync() {
     // 3 заміри для точного offset, потім перевірка дрейфу
     await resync(3);
     await checkAndCorrect();
-  }, 20000);
+  }, 10000);
 }
 
 function stopPeriodicSync() {
