@@ -123,7 +123,11 @@ async function scheduleAudio() {
 }
 
 function stopNode() {
-  if (sourceNode) { try { sourceNode.stop(); } catch {} sourceNode = null; }
+  if (sourceNode) {
+    try { sourceNode.stop(0); } catch {}
+    try { sourceNode.disconnect(); } catch {}
+    sourceNode = null;
+  }
 }
 
 function songEnded() {
@@ -446,8 +450,9 @@ async function handleMsg(msg) {
         songPicker.hidden = true; playBtn.hidden = true;
         pauseBtn.hidden = true; syncLabel.hidden = true;
         lyricsCont.hidden = true;
-        syncAudioEnabled = false;
-        setHeaderToggle(false); // сховано — покажемо тільки через sync_audio
+        // syncAudio стан отримуємо від сервера через msg.syncAudio
+        syncAudioEnabled = msg.syncAudio || false;
+        setHeaderToggle(syncAudioEnabled);
         setStatus('Очікування хоста…');
       }
       break;
@@ -498,9 +503,15 @@ async function handleMsg(msg) {
     // ── Stop ─────────────────────────────────────────────────────────────────
     case 'stop': {
       playing = false; paused = false; startTime = null;
-      stopNode(); releaseWakeLock();
+      stopNode();
+      // Додатково глушимо через gainNode щоб гарантовано зупинити
+      if (gainNode) { gainNode.gain.setValueAtTime(0, audioCtx?.currentTime || 0); }
+      releaseWakeLock();
       stopAnim(); stopScroll(); clearHL(); resetScroll();
+      // Відновлюємо гучність для наступного play
+      setTimeout(() => { if (gainNode) gainNode.gain.setValueAtTime(isMuted ? 0 : 1, audioCtx?.currentTime || 0); }, 100);
       if (role === 'host') {
+        playBtn.hidden = false;
         playBtn.textContent = '▶ Грати'; pauseBtn.hidden = true;
         highlightSong(currentSong, false);
         setStatus('Зупинено. Виберіть пісню та натисніть «Грати».');
@@ -641,7 +652,7 @@ function renderWords() {
     // Перенос рядка якщо пауза між словами > 2 секунди
     if (i > 0 && (e.start - lyrics[i-1].end) >= 2.0) {
       const br = document.createElement('div');
-      br.style.height = '0.6em';
+      br.style.height = '1.4em';
       lyricsEl.appendChild(br);
     }
     const s = document.createElement('span');
