@@ -6,6 +6,12 @@ export default {
     const url = new URL(request.url);
     if (request.method === 'OPTIONS') return cors(new Response(null, { status: 204 }));
 
+    // GET /api/songs — сканує assets і повертає список пісень
+    if (url.pathname === '/api/songs') {
+      const songs = getSongList(env);
+      return cors(json(songs));
+    }
+
     if (url.pathname === '/create') {
       const roomId   = crypto.randomUUID().split('-')[0].slice(0, 6);
       const clientId = url.searchParams.get('clientId') || crypto.randomUUID();
@@ -30,6 +36,24 @@ export default {
 };
 
 // =============================================================================
+// Сканування пісень через __STATIC_CONTENT_MANIFEST
+// Cloudflare автоматично надає цю змінну — це JSON з усіма файлами assets
+// =============================================================================
+function getSongList(env) {
+  try {
+    // env.__STATIC_CONTENT_MANIFEST — рядок JSON виду {"songs/test.mp3":"hashed-url",...}
+    const manifest = JSON.parse(env.__STATIC_CONTENT_MANIFEST);
+    const songs = Object.keys(manifest)
+      .filter(k => k.startsWith('songs/') && k.endsWith('.mp3'))
+      .map(k => k.slice('songs/'.length, -'.mp3'.length))
+      .sort();
+    return songs.length > 0 ? songs : ['test'];
+  } catch {
+    return ['test'];
+  }
+}
+
+// =============================================================================
 // Durable Object
 // =============================================================================
 export class KaraokeRoom {
@@ -38,11 +62,11 @@ export class KaraokeRoom {
     this.sessions     = [];
     this.playing      = false;
     this.paused       = false;
-    this.startTime    = null;  // серверний ms старту (з урахуванням пауз)
-    this.pauseTime    = null;  // серверний ms коли поставили на паузу
+    this.startTime    = null;
+    this.pauseTime    = null;
     this.song         = null;
     this.hostClientId = null;
-    this.syncAudio    = false; // чи грати музику на всіх
+    this.syncAudio    = false;
     this.ready        = false;
   }
 
@@ -102,7 +126,6 @@ export class KaraokeRoom {
       }
       this.onMessage(session, msg);
     });
-
     ws.addEventListener('close', () => this.onClose(session));
     ws.addEventListener('error', () => this.onClose(session));
   }
@@ -112,15 +135,14 @@ export class KaraokeRoom {
       type: 'joined', role: session.role,
       clientId: session.clientId, serverTime: Date.now(),
     }));
-    // Late-joiner sync
     if (this.playing && !this.paused && this.startTime !== null) {
       session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio }));
-      if (this.syncAudio) {
-        session.ws.send(JSON.stringify({ type: 'sync_audio', enabled: true }));
-      }
     } else if (this.playing && this.paused) {
       session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio }));
       session.ws.send(JSON.stringify({ type: 'pause', pauseTime: this.pauseTime }));
+    }
+    if (!this.playing && this.syncAudio) {
+      session.ws.send(JSON.stringify({ type: 'sync_audio', enabled: true }));
     }
   }
 
@@ -133,8 +155,7 @@ export class KaraokeRoom {
       case 'play':
         if (session.role !== 'host') return;
         this.playing   = true; this.paused = false;
-        // +2.5s щоб всі встигли завантажити буфер і точно синхронізуватись
-        this.startTime = Date.now() + 2500;
+        this.startTime = Date.now() + 3000;
         this.song      = msg.song || 'test';
         await this.state.storage.put('playing',   true);
         await this.state.storage.put('paused',    false);
@@ -154,9 +175,7 @@ export class KaraokeRoom {
 
       case 'resume':
         if (session.role !== 'host' || !this.paused) return;
-        // Зміщуємо startTime вперед на час паузи + затримку синхронізації
-        const pauseDuration = Date.now() - this.pauseTime;
-        this.startTime = this.startTime + pauseDuration + 2500;
+        this.startTime = this.startTime + (Date.now() - this.pauseTime) + 2000;
         this.paused    = false; this.pauseTime = null;
         await this.state.storage.put('paused',    false);
         await this.state.storage.put('startTime', this.startTime);
@@ -167,12 +186,11 @@ export class KaraokeRoom {
       case 'stop':
         if (session.role !== 'host') return;
         this.playing = false; this.paused = false;
-        this.startTime = null; this.pauseTime = null; this.syncAudio = false;
+        this.startTime = null; this.pauseTime = null;
         await this.state.storage.put('playing', false);
         await this.state.storage.put('paused',  false);
         await this.state.storage.delete('startTime');
         await this.state.storage.delete('pauseTime');
-        await this.state.storage.put('syncAudio', false);
         this.broadcast({ type: 'stop' });
         break;
 
@@ -180,7 +198,6 @@ export class KaraokeRoom {
         if (session.role !== 'host') return;
         this.syncAudio = msg.enabled;
         await this.state.storage.put('syncAudio', msg.enabled);
-        // Транслюємо тільки учасникам (не хосту)
         for (const s of this.sessions) {
           if (s.role !== 'host') {
             try { s.ws.send(JSON.stringify({ type: 'sync_audio', enabled: msg.enabled })); } catch {}
