@@ -83,13 +83,15 @@ async function loadBuffer(song) {
 // =============================================================================
 // Playback
 // =============================================================================
-function scheduleAudio() {
+async function scheduleAudio() {
   const buf = buffers[currentSong];
-  console.log('[scheduleAudio]', {song: currentSong, hasBuf: !!buf, startTime, hasCtx: !!audioCtx, role, syncAudioEnabled, audioUnlocked, audioReady});
   if (!buf || startTime === null || !audioCtx) return;
   stopAudioNode();
-  // Переконуємось що AudioContext активний
-  if (audioCtx.state === 'suspended') audioCtx.resume();
+  // iOS: чекаємо поки AudioContext відновиться
+  if (audioCtx.state === 'suspended') {
+    try { await audioCtx.resume(); } catch {}
+  }
+  // Перераховуємо після resume (пройшов час)
   const msUntil = startTime - serverNow();
   const elapsed = Math.max(0, -msUntil / 1000);
   const off     = Math.min(elapsed, buf.duration - 0.01);
@@ -494,6 +496,7 @@ async function onPlay(song) {
   playing = true; paused = false;
   requestWakeLock();
   if (role === 'host') {
+    playBtn.hidden = false;
     playBtn.textContent = '⏹ Стоп';
     pauseBtn.hidden = false; pauseBtn.textContent = '⏸ Пауза';
     highlightSong(song, true);
