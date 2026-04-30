@@ -166,36 +166,56 @@ async function syncOnEntry(id) {
   }
 }
 
-// Ресинхронізація — 3 паралельних запити для точного offset
-async function resync() {
-  await Promise.all([0,1,2].map(async () => {
+// Послідовні заміри з мінімальним інтервалом — найточніший метод
+// Відкидаємо найгірші RTT автоматично через addSample
+async function resync(count = 5) {
+  for (let i = 0; i < count; i++) {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
     if (res?.ok) addSample((await res.json()).serverTime, t0);
-  }));
+    if (i < count - 1) await new Promise(r => setTimeout(r, 30));
+  }
 }
 
-// Після старту робимо ще 2 корекції: через 1с і через 3с
-// Якщо дрейф > 50ms — перезапускаємо з правильної позиції
+// Поточна позиція відтворення в секундах
+function getActualPos() {
+  if (!sourceNode || !audioCtx) return null;
+  return sourceNode._off + (audioCtx.currentTime - sourceNode._when);
+}
+
+// Перевірка дрейфу і корекція якщо потрібно
+async function checkAndCorrect() {
+  if (!playing || paused || startTime === null) return;
+  // Один запит для уточнення offset
+  const t0  = Date.now();
+  const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
+  if (!res?.ok) return;
+  addSample((await res.json()).serverTime, t0);
+  const expected = (serverNow() - startTime) / 1000;
+  const actual   = getActualPos();
+  if (actual === null) { scheduleAudio(); return; }
+  const drift = Math.abs(actual - expected);
+  if (drift > 0.030) { // > 30ms — коригуємо
+    scheduleAudio();
+  }
+}
+
+// Планує серію корекцій після старту
+// 0.5с, 1.5с, 3с, 6с — перші корекції часті, потім рідше
+let correctionTimers = [];
 function schedulePostStartCorrections() {
-  [1000, 3000].forEach(delay => {
-    setTimeout(async () => {
-      if (!playing || paused || startTime === null) return;
-      // Один запит для уточнення offset
-      const t0  = Date.now();
-      const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
-      if (!res?.ok) return;
-      addSample((await res.json()).serverTime, t0);
-      // Перевіряємо дрейф
-      if (!sourceNode || !audioCtx) return;
-      const expected = (serverNow() - startTime) / 1000;
-      const actual   = sourceNode._off + (audioCtx.currentTime - sourceNode._when);
-      const drift    = Math.abs(actual - expected);
-      if (drift > 0.05) { // > 50ms — коригуємо
-        scheduleAudio();
-      }
-    }, delay);
+  // Скасовуємо попередні
+  correctionTimers.forEach(t => clearTimeout(t));
+  correctionTimers = [];
+  [500, 1500, 3000, 6000].forEach(delay => {
+    const t = setTimeout(() => checkAndCorrect(), delay);
+    correctionTimers.push(t);
   });
+}
+
+function cancelCorrections() {
+  correctionTimers.forEach(t => clearTimeout(t));
+  correctionTimers = [];
 }
 
 // =============================================================================
@@ -310,7 +330,7 @@ if (headerToggle) {
     updateSpeakerUI();
     // Якщо вмикаємо звук під час відтворення — синхронізуємось
     if (!isMuted && syncAudioEnabled && audioUnlocked && playing && !paused && startTime !== null) {
-      resync().then(() => { scheduleAudio(); schedulePostStartCorrections(); });
+      resync(4).then(() => { scheduleAudio(); schedulePostStartCorrections(); });
     } else if (isMuted) {
       stopNode(); // зупиняємо відтворення
     }
@@ -476,6 +496,7 @@ async function handleMsg(msg) {
     // ── Pause ────────────────────────────────────────────────────────────────
     case 'pause': {
       paused = true;
+      cancelCorrections();
       stopNode();
       stopAnim(); stopScroll();
       if (role === 'host') { pauseBtn.textContent = '▶ Продовжити'; setStatus('Пауза.'); }
@@ -493,7 +514,7 @@ async function handleMsg(msg) {
       setStatus('');
       if (role === 'host') { pauseBtn.textContent = '⏸ Пауза'; }
       if (role === 'host' || (syncAudioEnabled && audioUnlocked && audioBuffer && !isMuted)) {
-        await resync();
+        await resync(3);
         scheduleAudio();
         schedulePostStartCorrections();
       }
@@ -503,12 +524,11 @@ async function handleMsg(msg) {
     // ── Stop ─────────────────────────────────────────────────────────────────
     case 'stop': {
       playing = false; paused = false; startTime = null;
+      cancelCorrections();
       stopNode();
-      // Додатково глушимо через gainNode щоб гарантовано зупинити
       if (gainNode) { gainNode.gain.setValueAtTime(0, audioCtx?.currentTime || 0); }
       releaseWakeLock();
       stopAnim(); stopScroll(); clearHL(); resetScroll();
-      // Відновлюємо гучність для наступного play
       setTimeout(() => { if (gainNode) gainNode.gain.setValueAtTime(isMuted ? 0 : 1, audioCtx?.currentTime || 0); }, 100);
       if (role === 'host') {
         playBtn.hidden = false;
@@ -545,7 +565,9 @@ async function handleMsg(msg) {
           }
           // Якщо зараз відтворення — синхронізуємось і запускаємо
           if (playing && !paused && startTime !== null) {
-            await resync();
+            // sync_audio під час відтворення — найбільше замірів
+            // бо клієнт може мати неточний offset
+            await resync(6);
             scheduleAudio();
             schedulePostStartCorrections();
           }
@@ -594,7 +616,8 @@ async function doPlay(song) {
     if (!audioBuffer || currentSong !== song) {
       try { await ensureBuffer(song); } catch (e) { setStatus('⚠ ' + e.message); return; }
     }
-    await resync();
+    // Хост: 3 заміри перед стартом (startTime = now+3s, є час)
+    await resync(3);
     scheduleAudio();
     schedulePostStartCorrections();
 
@@ -605,7 +628,9 @@ async function doPlay(song) {
       try { await ensureBuffer(song); setStatus(''); }
       catch (e) { setStatus('⚠ ' + e.message); return; }
     }
-    await resync();
+    // Клієнт: 5 замірів — більше часу є якщо startTime в майбутньому,
+    // якщо в минулому — швидко рахуємо elapsed і коригуємо
+    await resync(5);
     scheduleAudio();
     schedulePostStartCorrections();
   }
