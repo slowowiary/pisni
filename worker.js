@@ -114,12 +114,12 @@ export class KaraokeRoom {
     }));
     // Late-joiner sync
     if (this.playing && !this.paused && this.startTime !== null) {
-      session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song }));
+      session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio }));
       if (this.syncAudio) {
         session.ws.send(JSON.stringify({ type: 'sync_audio', enabled: true }));
       }
     } else if (this.playing && this.paused) {
-      session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song }));
+      session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio }));
       session.ws.send(JSON.stringify({ type: 'pause', pauseTime: this.pauseTime }));
     }
   }
@@ -140,7 +140,7 @@ export class KaraokeRoom {
         await this.state.storage.put('paused',    false);
         await this.state.storage.put('startTime', this.startTime);
         await this.state.storage.put('song',      this.song);
-        this.broadcast({ type: 'play', startTime: this.startTime, song: this.song });
+        this.broadcast({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio });
         break;
 
       case 'pause':
@@ -161,7 +161,7 @@ export class KaraokeRoom {
         await this.state.storage.put('paused',    false);
         await this.state.storage.put('startTime', this.startTime);
         await this.state.storage.delete('pauseTime');
-        this.broadcast({ type: 'resume', startTime: this.startTime, song: this.song });
+        this.broadcast({ type: 'resume', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio });
         break;
 
       case 'stop':
