@@ -155,7 +155,7 @@ export class KaraokeRoom {
       case 'play':
         if (session.role !== 'host') return;
         this.playing   = true;
-        this.startTime = Date.now();
+        this.startTime = Date.now() + 2000; // +2s щоб всі встигли підготуватись
         this.song      = msg.song || 'test';
         await this.state.storage.put('playing',   true);
         await this.state.storage.put('startTime', this.startTime);
