@@ -78,6 +78,7 @@ async function loadBuffer(song) {
 // =============================================================================
 function scheduleAudio() {
   const buf = buffers[currentSong];
+  console.log('[scheduleAudio]', {song: currentSong, hasBuf: !!buf, startTime, hasCtx: !!audioCtx, role, syncAudioEnabled, audioUnlocked, audioReady});
   if (!buf || startTime === null || !audioCtx) return;
   stopAudioNode();
   // Переконуємось що AudioContext активний
@@ -426,14 +427,17 @@ function onMessage(msg) {
         updateSpeakerUI();
         if (isMuted) break; // заглушено — не завантажуємо
         // Завантажуємо буфер і грає якщо вже відтворення
-        if (currentSong && !buffers[currentSong]) {
-          setStatus('⏳ Завантаження…');
-          loadBuffer(currentSong).then(() => {
-            audioReady = true; setStatus('');
+        if (currentSong) {
+          if (!buffers[currentSong]) {
+            setStatus('⏳ Завантаження…');
+            loadBuffer(currentSong).then(() => {
+              audioReady = true; setStatus('');
+              if (playing && !paused && startTime !== null) scheduleAudio();
+            }).catch(e => setStatus('⚠ ' + e.message));
+          } else {
+            audioReady = true;
             if (playing && !paused && startTime !== null) scheduleAudio();
-          }).catch(e => setStatus('⚠ ' + e.message));
-        } else if (audioReady && playing && !paused && startTime !== null) {
-          scheduleAudio();
+          }
         }
       } else {
         headerToggle.hidden = true;
@@ -496,10 +500,17 @@ async function onPlay(song) {
       catch (e) { setStatus('⚠ ' + e.message); return; }
     }
     scheduleAudio();
-  } else if (clientShouldPlay()) {
+  } else if (syncAudioEnabled && audioUnlocked && !isMuted) {
+    // Завантажуємо буфер якщо нема
     if (!buffers[song]) {
-      try { await loadBuffer(song); audioReady = true; }
-      catch (e) { return; }
+      try {
+        setStatus('⏳ Завантаження…');
+        await loadBuffer(song);
+        audioReady = true;
+        setStatus('');
+      } catch (e) { return; }
+    } else {
+      audioReady = true;
     }
     scheduleAudio();
   }
@@ -514,7 +525,7 @@ function onPause() {
 function onResume(song) {
   paused = false; setStatus(''); startAnimation(); startScroll(); requestWakeLock();
   if (role === 'host') { pauseBtn.textContent = '⏸ Пауза'; scheduleAudio(); }
-  else if (clientShouldPlay()) scheduleAudio();
+  else if (syncAudioEnabled && audioUnlocked && audioReady && !isMuted) scheduleAudio();
 }
 
 function onStop() {
