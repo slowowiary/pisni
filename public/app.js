@@ -212,22 +212,43 @@ async function checkAndCorrect() {
   }
 }
 
-// Планує серію корекцій після старту
-// Більше корекцій на початку, потім рідше
+// Планує серію корекцій після старту + постійний інтервал кожні 20с
 let correctionTimers = [];
+let periodicSyncInterval = null;
+
 function schedulePostStartCorrections() {
   correctionTimers.forEach(t => clearTimeout(t));
   correctionTimers = [];
-  // 300ms, 800ms, 1.5s, 3s, 6s, 12s — агресивніші на старті
-  [300, 800, 1500, 3000, 6000, 12000].forEach(delay => {
+  // Дві перевірки після старту: 3s і 6s (раніше — пісня ще не грає або дрейф нульовий)
+  [3000, 6000].forEach(delay => {
     const t = setTimeout(() => checkAndCorrect(), delay);
     correctionTimers.push(t);
   });
+  // Потім кожні 20 секунд — щоб дрейф не накопичувався
+  startPeriodicSync();
+}
+
+function startPeriodicSync() {
+  stopPeriodicSync();
+  periodicSyncInterval = setInterval(async () => {
+    if (!playing || paused) return;
+    // 3 заміри для точного offset, потім перевірка дрейфу
+    await resync(3);
+    await checkAndCorrect();
+  }, 20000);
+}
+
+function stopPeriodicSync() {
+  if (periodicSyncInterval) {
+    clearInterval(periodicSyncInterval);
+    periodicSyncInterval = null;
+  }
 }
 
 function cancelCorrections() {
   correctionTimers.forEach(t => clearTimeout(t));
   correctionTimers = [];
+  stopPeriodicSync();
 }
 
 // =============================================================================
@@ -580,28 +601,30 @@ async function handleMsg(msg) {
 
       if (msg.enabled) {
         setHeaderToggle(true);
+        // Оновлюємо currentSong якщо worker передав нову пісню
+        if (msg.song && msg.song !== currentSong) {
+          currentSong = msg.song;
+          clearBuffer();
+          await loadLyrics(msg.song);
+        }
 
         if (!isMuted && audioUnlocked && currentSong) {
-          // FIX: якщо буфер від іншої пісні — скидаємо
-          if (audioBuffer && loadingSong !== currentSong && !audioBuffer._song) {
-            // перевіряємо через loadingSong
-          }
-
-          if (!audioBuffer || loadingSong !== null) {
+          if (!audioBuffer) {
             setStatus('⏳ Завантаження…');
             try {
-              await ensureBuffer(currentSong);
+              // Паралельно: завантажуємо буфер + перші заміри
+              await Promise.all([
+                ensureBuffer(currentSong),
+                resync(4),
+              ]);
               setStatus('');
             } catch (e) {
               setStatus('⚠ ' + e.message); break;
             }
           }
-
-          // FIX: синхронізуємось ПІСЛЯ завантаження буфера
-          // бо завантаження могло зайняти час і offset застарів
           if (playing && !paused && startTime !== null) {
-            // 8 замірів — найточніше, бо клієнт тільки підключив аудіо
-            await resync(8);
+            // Після завантаження — ще заміри для точного старту "на льоту"
+            await resync(4);
             scheduleAudio();
             schedulePostStartCorrections();
           }
@@ -644,25 +667,32 @@ async function doPlay(song) {
   resetScroll(); setStatus(''); startAnim(); startScroll();
 
   if (role === 'host') {
-    // FIX: якщо буфер не завантажений або від іншої пісні — завантажуємо
     if (!audioBuffer || currentSong !== song) {
       try { await ensureBuffer(song); } catch (e) { setStatus('⚠ ' + e.message); return; }
     }
-    await resync(3);
+    // Хост: resync перед стартом — є 3 секунди запасу
+    await resync(5);
     scheduleAudio();
     schedulePostStartCorrections();
 
   } else if (syncAudioEnabled && audioUnlocked && !isMuted) {
-    // FIX: завжди скидаємо буфер якщо пісня інша
     if (!audioBuffer || currentSong !== song) {
       stopNode();
       clearBuffer();
       setStatus('⏳ Завантаження…');
-      try { await ensureBuffer(song); setStatus(''); }
-      catch (e) { setStatus('⚠ ' + e.message); return; }
+      // Паралельно завантажуємо буфер І робимо перші заміри часу —
+      // щоб не втрачати час поки качається MP3
+      try {
+        const [buf] = await Promise.all([
+          ensureBuffer(song),
+          resync(4),   // перші 4 заміри під час завантаження
+        ]);
+        setStatus('');
+      } catch (e) { setStatus('⚠ ' + e.message); return; }
     }
-    // FIX: синхронізуємось ПІСЛЯ завантаження — важливо для точності
-    await resync(5);
+    // Після завантаження — ще 4 заміри вже з точним offset
+    // (перші могли бути зроблені до кінця завантаження — offset міг змінитись)
+    await resync(4);
     scheduleAudio();
     schedulePostStartCorrections();
   }
