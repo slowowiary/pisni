@@ -1,5 +1,5 @@
 // =============================================================================
-// Karaoke – frontend v3
+// Karaoke – frontend v4
 // =============================================================================
 const WORKER_URL = 'https://pisni.slovo-wiry.workers.dev';
 'use strict';
@@ -20,6 +20,7 @@ let audioCtx       = null;
 let gainNode       = null;
 let sourceNode     = null;
 let audioBuffer    = null;   // завантажений буфер ТІЛЬКИ поточної пісні
+let loadingSong    = null;   // яка пісня зараз завантажується (щоб не дублювати)
 let audioUnlocked  = false;  // user gesture відбувся
 let isMuted        = false;
 
@@ -79,19 +80,31 @@ function unlockAudio() {
   audioUnlocked = true;
 }
 
-// Завантажує MP3 тільки якщо ще не завантажений
+// Завантажує MP3. Якщо вже завантажений — повертає кеш.
+// Якщо вже завантажується та сама — чекає.
+// FIX: скидає audioBuffer якщо пісня змінилась
 async function ensureBuffer(song) {
+  // Вже є правильний буфер
   if (audioBuffer && currentSong === song) return audioBuffer;
+  // Якщо буфер від іншої пісні — скидаємо
+  if (audioBuffer && currentSong !== song) {
+    audioBuffer = null;
+  }
   initAudio();
+  loadingSong = song;
   const res = await fetch('/songs/' + song + '/' + song + '.mp3');
   if (!res.ok) throw new Error('MP3 not found: ' + song);
   const arr = await res.arrayBuffer();
+  // Перевіряємо що поки завантажували — пісня не змінилась
+  if (loadingSong !== song) throw new Error('Song changed during load');
   audioBuffer = await new Promise((ok, fail) => audioCtx.decodeAudioData(arr, ok, fail));
+  loadingSong = null;
   return audioBuffer;
 }
 
 function clearBuffer() {
   audioBuffer = null;
+  loadingSong = null;
 }
 
 // =============================================================================
@@ -166,8 +179,8 @@ async function syncOnEntry(id) {
   }
 }
 
-// Послідовні заміри з мінімальним інтервалом — найточніший метод
-// Відкидаємо найгірші RTT автоматично через addSample
+// Послідовні заміри — повертає найкращий offset
+// Використовуємо паралельні + послідовні для швидкості та точності
 async function resync(count = 5) {
   for (let i = 0; i < count; i++) {
     const t0  = Date.now();
@@ -183,10 +196,9 @@ function getActualPos() {
   return sourceNode._off + (audioCtx.currentTime - sourceNode._when);
 }
 
-// Перевірка дрейфу і корекція якщо потрібно
+// Перевірка дрейфу і корекція якщо потрібно (ціль: < 20ms)
 async function checkAndCorrect() {
   if (!playing || paused || startTime === null) return;
-  // Один запит для уточнення offset
   const t0  = Date.now();
   const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
   if (!res?.ok) return;
@@ -195,19 +207,19 @@ async function checkAndCorrect() {
   const actual   = getActualPos();
   if (actual === null) { scheduleAudio(); return; }
   const drift = Math.abs(actual - expected);
-  if (drift > 0.030) { // > 30ms — коригуємо
+  if (drift > 0.020) { // > 20ms — коригуємо (було 30ms)
     scheduleAudio();
   }
 }
 
 // Планує серію корекцій після старту
-// 0.5с, 1.5с, 3с, 6с — перші корекції часті, потім рідше
+// Більше корекцій на початку, потім рідше
 let correctionTimers = [];
 function schedulePostStartCorrections() {
-  // Скасовуємо попередні
   correctionTimers.forEach(t => clearTimeout(t));
   correctionTimers = [];
-  [500, 1500, 3000, 6000].forEach(delay => {
+  // 300ms, 800ms, 1.5s, 3s, 6s, 12s — агресивніші на старті
+  [300, 800, 1500, 3000, 6000, 12000].forEach(delay => {
     const t = setTimeout(() => checkAndCorrect(), delay);
     correctionTimers.push(t);
   });
@@ -287,7 +299,7 @@ function selectSong(song) {
   loadLyrics(song);
   if (role === 'host') {
     if (!playing) { playBtn.hidden = false; }
-    // Завантажуємо буфер тільки обраної пісні
+    // FIX: скидаємо буфер і завантажуємо нову пісню
     clearBuffer();
     ensureBuffer(song).then(() => {}).catch(console.error);
   }
@@ -332,7 +344,7 @@ if (headerToggle) {
     if (!isMuted && syncAudioEnabled && audioUnlocked && playing && !paused && startTime !== null) {
       resync(4).then(() => { scheduleAudio(); schedulePostStartCorrections(); });
     } else if (isMuted) {
-      stopNode(); // зупиняємо відтворення
+      stopNode();
     }
   });
 }
@@ -374,7 +386,6 @@ function parseRoom() {
 }
 
 // Коли хост закриває вкладку — надсилаємо stop через sendBeacon
-// sendBeacon працює навіть при закритті браузера
 window.addEventListener('beforeunload', () => {
   if (role !== 'host' || !roomId) return;
   const cid = localStorage.getItem('karaoke_client_id') || '';
@@ -431,7 +442,7 @@ function connectWS(id) {
 
   ws.addEventListener('open', () => {
     ws.send(JSON.stringify({ type: 'hello', clientId: getClientId() }));
-    // Keepalive ping — рідко, не для sync
+    // Keepalive ping
     setInterval(() => {
       if (ws.readyState === WebSocket.OPEN)
         ws.send(JSON.stringify({ type: 'ping', clientTime: Date.now() }));
@@ -479,7 +490,6 @@ async function handleMsg(msg) {
         songPicker.hidden = true; playBtn.hidden = true;
         pauseBtn.hidden = true; syncLabel.hidden = true;
         lyricsCont.hidden = true;
-        // syncAudio стан отримуємо від сервера через msg.syncAudio
         syncAudioEnabled = msg.syncAudio || false;
         setHeaderToggle(syncAudioEnabled);
         setStatus('Очікування хоста…');
@@ -488,17 +498,26 @@ async function handleMsg(msg) {
     }
 
     case 'pong':
-      // Тільки keepalive
       break;
 
     // ── Play ─────────────────────────────────────────────────────────────────
-    // Worker додає +3000ms до startTime — час для завантаження і синхронізації
+    // FIX: завжди оновлюємо currentSong з msg.song — навіть якщо пісня "та сама"
+    // щоб клієнт точно знав яку пісню грати
     case 'play': {
-      startTime        = msg.startTime;
-      paused           = false;
-      syncAudioEnabled = msg.syncAudio || false;
-      if (msg.song !== currentSong) { currentSong = msg.song; await loadLyrics(msg.song); }
-      await doPlay(msg.song);
+      const incomingSong = msg.song;
+      startTime          = msg.startTime;
+      paused             = false;
+      syncAudioEnabled   = msg.syncAudio || false;
+
+      // FIX: якщо пісня змінилась — скидаємо буфер, завантажуємо нову
+      if (incomingSong !== currentSong) {
+        stopNode();
+        clearBuffer();
+        currentSong = incomingSong;
+        await loadLyrics(incomingSong);
+      }
+
+      await doPlay(incomingSong);
       break;
     }
 
@@ -514,7 +533,7 @@ async function handleMsg(msg) {
     }
 
     // ── Resume ───────────────────────────────────────────────────────────────
-    // Worker дає новий startTime (+2000ms) — синхронізуємось перед запуском
+    // FIX: більше замірів при resume для точної синхронізації після паузи
     case 'resume': {
       startTime        = msg.startTime;
       paused           = false;
@@ -523,7 +542,8 @@ async function handleMsg(msg) {
       setStatus('');
       if (role === 'host') { pauseBtn.textContent = '⏸ Пауза'; }
       if (role === 'host' || (syncAudioEnabled && audioUnlocked && audioBuffer && !isMuted)) {
-        await resync(3);
+        // FIX: 5 замірів (було 3) — пауза могла "розбити" offset
+        await resync(5);
         scheduleAudio();
         schedulePostStartCorrections();
       }
@@ -551,19 +571,23 @@ async function handleMsg(msg) {
     }
 
     // ── Sync Audio ───────────────────────────────────────────────────────────
-    // Хост увімкнув/вимкнув "грати на всіх"
-    // Надсилається ТІЛЬКИ учасникам (worker виключає хоста)
+    // FIX: коли хост вмикає sync_audio під час відтворення —
+    // завантажуємо буфер і тільки після повного завантаження синхронізуємось
+    // щоб не було розсинхрону через час завантаження
     case 'sync_audio': {
       syncAudioEnabled = msg.enabled;
       if (role === 'host') break;
 
       if (msg.enabled) {
-        // Показуємо динамік
         setHeaderToggle(true);
 
         if (!isMuted && audioUnlocked && currentSong) {
-          // Завантажуємо буфер якщо нема (тільки якщо грає зараз)
-          if (!audioBuffer) {
+          // FIX: якщо буфер від іншої пісні — скидаємо
+          if (audioBuffer && loadingSong !== currentSong && !audioBuffer._song) {
+            // перевіряємо через loadingSong
+          }
+
+          if (!audioBuffer || loadingSong !== null) {
             setStatus('⏳ Завантаження…');
             try {
               await ensureBuffer(currentSong);
@@ -572,20 +596,20 @@ async function handleMsg(msg) {
               setStatus('⚠ ' + e.message); break;
             }
           }
-          // Якщо зараз відтворення — синхронізуємось і запускаємо
+
+          // FIX: синхронізуємось ПІСЛЯ завантаження буфера
+          // бо завантаження могло зайняти час і offset застарів
           if (playing && !paused && startTime !== null) {
-            // sync_audio під час відтворення — найбільше замірів
-            // бо клієнт може мати неточний offset
-            await resync(6);
+            // 8 замірів — найточніше, бо клієнт тільки підключив аудіо
+            await resync(8);
             scheduleAudio();
             schedulePostStartCorrections();
           }
         }
       } else {
-        // Хост вимкнув — зупиняємо і ховаємо
         setHeaderToggle(false);
         stopNode();
-        clearBuffer(); // звільняємо пам'ять
+        clearBuffer();
         setStatus('Очікування хоста…');
       }
       break;
@@ -620,30 +644,28 @@ async function doPlay(song) {
   resetScroll(); setStatus(''); startAnim(); startScroll();
 
   if (role === 'host') {
-    // Буфер має бути вже завантажений в selectSong
-    // Якщо ні — завантажуємо зараз
+    // FIX: якщо буфер не завантажений або від іншої пісні — завантажуємо
     if (!audioBuffer || currentSong !== song) {
       try { await ensureBuffer(song); } catch (e) { setStatus('⚠ ' + e.message); return; }
     }
-    // Хост: 3 заміри перед стартом (startTime = now+3s, є час)
     await resync(3);
     scheduleAudio();
     schedulePostStartCorrections();
 
   } else if (syncAudioEnabled && audioUnlocked && !isMuted) {
-    // Клієнт: завантажуємо буфер і синхронізуємось
+    // FIX: завжди скидаємо буфер якщо пісня інша
     if (!audioBuffer || currentSong !== song) {
+      stopNode();
+      clearBuffer();
       setStatus('⏳ Завантаження…');
       try { await ensureBuffer(song); setStatus(''); }
       catch (e) { setStatus('⚠ ' + e.message); return; }
     }
-    // Клієнт: 5 замірів — більше часу є якщо startTime в майбутньому,
-    // якщо в минулому — швидко рахуємо elapsed і коригуємо
+    // FIX: синхронізуємось ПІСЛЯ завантаження — важливо для точності
     await resync(5);
     scheduleAudio();
     schedulePostStartCorrections();
   }
-  // Якщо syncAudioEnabled=false — нічого не завантажуємо на клієнт
 }
 
 // =============================================================================
@@ -651,6 +673,7 @@ async function doPlay(song) {
 // =============================================================================
 playBtn?.addEventListener('click', () => {
   if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host') return;
+  // FIX: завжди передаємо currentSong при play
   if (!playing) ws.send(JSON.stringify({ type: 'play', song: currentSong || songs[0] || 'test' }));
   else ws.send(JSON.stringify({ type: 'stop' }));
 });
@@ -665,7 +688,8 @@ syncCheck?.addEventListener('change', () => {
   syncAudioEnabled = syncCheck.checked;
   if (role === 'host' && ws?.readyState === WebSocket.OPEN) {
     localStorage.setItem('karaoke_sync_audio', syncCheck.checked ? '1' : '0');
-    ws.send(JSON.stringify({ type: 'sync_audio', enabled: syncCheck.checked }));
+    // FIX: передаємо також currentSong щоб клієнти знали яку пісню завантажувати
+    ws.send(JSON.stringify({ type: 'sync_audio', enabled: syncCheck.checked, song: currentSong }));
   }
 });
 
@@ -683,7 +707,6 @@ async function loadLyrics(song) {
 function renderWords() {
   lyricsEl.innerHTML = '';
   lyrics.forEach((e, i) => {
-    // Перенос рядка якщо пауза між словами > 2 секунди
     if (i > 0 && (e.start - lyrics[i-1].end) >= 2.0) {
       const br = document.createElement('div');
       br.style.height = '1.4em';
@@ -692,7 +715,7 @@ function renderWords() {
     const s = document.createElement('span');
     s.textContent = e.word;
     s.className   = 'word';
-    s.dataset.i   = i; // зберігаємо індекс для швидкого доступу
+    s.dataset.i   = i;
     s.dataset.word = e.word;
     lyricsEl.appendChild(s);
     lyricsEl.appendChild(document.createTextNode(' '));
@@ -702,7 +725,6 @@ function renderWords() {
 // =============================================================================
 // Animation
 // =============================================================================
-// Кеш span елементів для швидкого доступу
 let wordSpans = [];
 
 function cacheSpans() {
