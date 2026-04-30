@@ -126,6 +126,15 @@
       font-weight: 700;
       text-shadow: 0 0 20px rgba(255, 64, 129, 0.5);
     }
+    #sync-audio-label {
+      font-size: 0.9rem;
+      color: #888;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    #sync-audio-label input { width: 1.1rem; height: 1.1rem; cursor: pointer; accent-color: #ff4081; }
   </style>
 </head>
 <body>
@@ -147,6 +156,8 @@
     <div id="status"></div>
 
     <button id="play-btn" hidden>Play</button>
+
+    <label id="sync-audio-label"><input type="checkbox" id="sync-audio-check"> 🎵 Play music on this device</label>
 
     <div id="lyrics"></div>
   </div>
