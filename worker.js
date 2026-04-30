@@ -166,7 +166,7 @@ export class KaraokeRoom {
       session.ws.send(JSON.stringify({ type: 'pause', pauseTime: this.pauseTime }));
     }
     if (!this.playing && this.syncAudio) {
-      session.ws.send(JSON.stringify({ type: 'sync_audio', enabled: true }));
+      session.ws.send(JSON.stringify({ type: 'sync_audio', enabled: true, song: this.song }));
     }
   }
 
@@ -224,7 +224,8 @@ export class KaraokeRoom {
         await this.state.storage.put('syncAudio', msg.enabled);
         for (const s of this.sessions) {
           if (s.role !== 'host') {
-            try { s.ws.send(JSON.stringify({ type: 'sync_audio', enabled: msg.enabled })); } catch {}
+            // FIX: передаємо song щоб клієнти знали яку пісню завантажувати
+            try { s.ws.send(JSON.stringify({ type: 'sync_audio', enabled: msg.enabled, song: this.song })); } catch {}
           }
         }
         break;
