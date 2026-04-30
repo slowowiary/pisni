@@ -107,13 +107,36 @@
     /* ── Кімната ─────────────────────────────────────────────── */
     #status { font-size: .9rem; color: #888; min-height: 1.3em; text-align: center; }
 
+    #room-url-label { font-size: .75rem; color: #999; margin-bottom: -.6rem; }
+
+    /* Обгортка: посилання + QR поруч */
+    #room-url-row {
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+      width: 100%;
+    }
     #room-url {
       background: #fff; border: 1px solid #c5cae9; border-radius: 8px;
       padding: .55rem 1rem; font-size: .85rem; color: #3f51b5;
-      word-break: break-all; cursor: pointer; width: 100%; text-align: center;
+      word-break: break-all; cursor: pointer; flex: 1; text-align: center;
+      transition: border-color .15s;
     }
     #room-url:hover { border-color: #3f51b5; }
-    #room-url-label { font-size: .75rem; color: #999; margin-bottom: -.6rem; }
+
+    /* QR-код */
+    #qr-wrap {
+      flex-shrink: 0;
+      width: 72px; height: 72px;
+      border: 1px solid #c5cae9; border-radius: 8px;
+      background: #fff;
+      display: flex; align-items: center; justify-content: center;
+      overflow: hidden;
+      cursor: pointer;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    #qr-wrap:hover { border-color: #3f51b5; box-shadow: 0 2px 8px rgba(63,81,181,.15); }
+    #qr-wrap canvas, #qr-wrap img { display: block; width: 64px !important; height: 64px !important; }
 
     .btn-row { display: flex; gap: .8rem; align-items: center; justify-content: center; flex-wrap: wrap; }
 
@@ -241,7 +264,10 @@
     <div id="room-view" hidden style="width:100%;display:flex;flex-direction:column;align-items:center;gap:1.2rem">
 
       <p id="room-url-label">Поділіться посиланням з друзями</p>
-      <div id="room-url" title="Натисніть, щоб скопіювати"></div>
+      <div id="room-url-row">
+        <div id="room-url" title="Натисніть, щоб скопіювати"></div>
+        <div id="qr-wrap" title="QR-код посилання"></div>
+      </div>
       <div id="status"></div>
 
       <div class="btn-row">
@@ -281,5 +307,49 @@ document.addEventListener('click', () => {
   if (v && v.paused) v.play().catch(() => {});
 }, { once: true });
 </script>
+
+  <!-- QR-код: бібліотека без бекенду -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script>
+    // Генерує QR прямо в браузері — без бекенду
+    let qrInstance = null;
+
+    function updateQR(url) {
+      const wrap = document.getElementById('qr-wrap');
+      if (!wrap || !url) return;
+      wrap.innerHTML = '';
+      qrInstance = new QRCode(wrap, {
+        text: url,
+        width: 64,
+        height: 64,
+        colorDark: '#1a1a2e',
+        colorLight: '#ffffff',
+        correctLevel: QRCode.CorrectLevel.M
+      });
+    }
+
+    // Перехоплюємо момент коли roomUrlEl отримує текст
+    const _origEnterRoom = window._enterRoomPatch;
+    const roomUrlEl2 = document.getElementById('room-url');
+    if (roomUrlEl2) {
+      const observer = new MutationObserver(() => {
+        const url = roomUrlEl2.textContent.trim();
+        if (url && url.startsWith('http')) updateQR(url);
+      });
+      observer.observe(roomUrlEl2, { childList: true, characterData: true, subtree: true });
+    }
+
+    // Клік на QR — копіює посилання
+    document.getElementById('qr-wrap')?.addEventListener('click', () => {
+      const url = document.getElementById('room-url')?.textContent?.trim();
+      if (!url) return;
+      navigator.clipboard.writeText(url).then(() => {
+        const wrap = document.getElementById('qr-wrap');
+        const prev = wrap.innerHTML;
+        wrap.innerHTML = '<div style="font-size:.6rem;color:#3f51b5;text-align:center;padding:4px;font-weight:700">Скопійовано!</div>';
+        setTimeout(() => { wrap.innerHTML = prev; }, 1500);
+      });
+    });
+  </script>
 </body>
 </html>
