@@ -1,115 +1,264 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="uk">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Karaoke</title>
+  <title>Karaoke — Зміст роки підзні</title>
   <style>
     [hidden] { display: none !important; }
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      background: #0d0d0d; color: #eee;
+      background: #f5f5f5;
+      color: #1a1a1a;
       font-family: 'Segoe UI', system-ui, sans-serif;
-      min-height: 100dvh; display: flex; flex-direction: column;
-      align-items: center; justify-content: center;
-      padding: 2rem; gap: 1rem;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
     }
 
-    h1 { font-size: clamp(2rem,8vw,4rem); letter-spacing:.25em; color:#ff4081; text-transform:uppercase; }
-    p.sub { color:#666; font-size:.95rem; margin-top:-.5rem; }
+    /* ── ШАПКА ─────────────────────────────────────────────── */
+    header {
+      background: #fff;
+      border-bottom: 2px solid #e0e0e0;
+      padding: 0 2rem;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      box-shadow: 0 2px 8px rgba(0,0,0,.06);
+    }
+    header h1 {
+      font-size: 1.3rem;
+      font-weight: 700;
+      color: #e91e63;
+      letter-spacing: .05em;
+    }
+
+    /* Динамік в шапці — для учасника */
+    #header-audio-toggle {
+      display: flex; align-items: center; gap: .4rem;
+      cursor: pointer;
+      padding: .35rem .7rem;
+      border: 2px solid #ddd;
+      border-radius: 8px;
+      background: #fafafa;
+      transition: border-color .2s, background .2s;
+      user-select: none;
+    }
+    #header-audio-toggle input { display: none; }
+    #header-audio-toggle .speaker {
+      font-size: 1.4rem;
+      transition: transform .15s;
+    }
+    /* стани */
+    #header-audio-toggle.loading {
+      border-color: #ff9800;
+      background: #fff8e1;
+      animation: pulse 1s infinite;
+    }
+    #header-audio-toggle.ready {
+      border-color: #4caf50;
+      background: #e8f5e9;
+    }
+    #header-audio-toggle.ready .speaker { transform: scale(1.1); }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: .6; }
+    }
+
+    /* ── ОСНОВНИЙ КОНТЕНТ ───────────────────────────────────── */
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1.5rem;
+      gap: 1.5rem;
+      max-width: 860px;
+      width: 100%;
+      margin: 0 auto;
+    }
+
+    #status {
+      font-size: .9rem;
+      color: #888;
+      min-height: 1.3em;
+      text-align: center;
+    }
+
+    /* ── Посилання на кімнату ────────────────────────────────── */
+    #room-url {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: .55rem 1rem;
+      font-size: .85rem;
+      color: #1565c0;
+      word-break: break-all;
+      cursor: pointer;
+      width: 100%;
+      text-align: center;
+      transition: border-color .15s;
+    }
+    #room-url:hover { border-color: #1565c0; }
+    #room-url-label { font-size: .75rem; color: #999; margin-bottom: -.8rem; }
+
+    /* ── Кнопки ──────────────────────────────────────────────── */
+    .btn-row { display: flex; gap: .8rem; align-items: center; justify-content: center; flex-wrap: wrap; }
 
     button {
-      background:#ff4081; color:#fff; border:none;
-      padding:.8rem 2.5rem; font-size:1.1rem; font-weight:600;
-      border-radius:8px; cursor:pointer;
-      transition:background .15s, transform .1s;
+      background: #e91e63; color: #fff; border: none;
+      padding: .75rem 2.2rem; font-size: 1rem; font-weight: 600;
+      border-radius: 8px; cursor: pointer;
+      transition: background .15s, transform .1s;
     }
-    button:hover  { background:#e0305e; transform:translateY(-1px); }
-    button:active { transform:translateY(0); }
-    button:disabled { background:#444; cursor:not-allowed; transform:none; }
-    #pause-btn { background:#555; }
-    #pause-btn:hover { background:#444; }
+    button:hover  { background: #c2185b; transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+    button:disabled { background: #bbb; cursor: not-allowed; transform: none; }
+    #pause-btn { background: #757575; padding: .75rem 1.6rem; }
+    #pause-btn:hover { background: #616161; }
 
-    #home-view { display:flex; flex-direction:column; align-items:center; gap:1.5rem; }
-    #room-view { display:flex; flex-direction:column; align-items:center; gap:1rem; width:100%; max-width:820px; }
-
-    #room-url {
-      background:#161616; border:1px solid #2a2a2a; border-radius:6px;
-      padding:.55rem 1rem; font-size:.85rem; color:#7ab4ff;
-      word-break:break-all; cursor:pointer; width:100%; text-align:center;
-      transition:border-color .15s;
+    /* ── Галочка хоста "Грати на всіх" ─────────────────────── */
+    #sync-audio-label {
+      display: flex; align-items: center; gap: .6rem;
+      cursor: pointer; padding: .55rem 1.1rem;
+      border: 2px solid #ddd; border-radius: 8px;
+      background: #fff; font-size: .9rem; color: #555;
+      transition: border-color .15s, background .15s;
+      user-select: none;
     }
-    #room-url:hover { border-color:#7ab4ff; }
-    #room-url-label { font-size:.75rem; color:#555; margin-bottom:-.5rem; }
-    #status { font-size:.9rem; color:#777; min-height:1.3em; text-align:center; }
+    #sync-audio-label:hover { border-color: #e91e63; }
+    #sync-audio-label.on { border-color: #e91e63; background: #fce4ec; color: #c2185b; font-weight: 600; }
+    #sync-audio-label input { accent-color: #e91e63; width: 1rem; height: 1rem; cursor: pointer; }
 
-    .btn-row { display:flex; gap:1rem; align-items:center; justify-content:center; flex-wrap:wrap; }
-    #play-btn  { font-size:1.3rem; padding:1rem 4rem; letter-spacing:.1em; }
-    #pause-btn { font-size:1rem; padding:.8rem 2rem; }
-
-    .audio-toggle {
-      display:flex; align-items:center; gap:.6rem;
-      font-size:.95rem; color:#aaa; cursor:pointer;
-      padding:.6rem 1.2rem; border:1px solid #2a2a2a; border-radius:10px;
-      transition:border-color .15s, color .15s, background .15s;
-      user-select:none;
+    /* ── Список пісень (хост) ────────────────────────────────── */
+    #song-picker {
+      width: 100%;
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      overflow: hidden;
     }
-    .audio-toggle:hover { border-color:#ff4081; color:#eee; background:#1a1a1a; }
-    .audio-toggle input { width:1.15rem; height:1.15rem; cursor:pointer; accent-color:#ff4081; }
-
-    /* Бейдж "Ready" */
-    #ready-badge {
-      background: #1a3a1a; border: 1px solid #2d7a2d;
-      color: #4caf50; font-size: .85rem; padding: .35rem .9rem;
-      border-radius: 20px; font-weight: 600;
+    #song-picker-title {
+      padding: .7rem 1rem;
+      font-size: .8rem;
+      color: #999;
+      border-bottom: 1px solid #f0f0f0;
+      text-transform: uppercase;
+      letter-spacing: .05em;
     }
+    #song-list {
+      list-style: none;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+    #song-list li {
+      padding: .75rem 1rem;
+      cursor: pointer;
+      border-bottom: 1px solid #f5f5f5;
+      display: flex; align-items: center; gap: .8rem;
+      transition: background .1s;
+      font-size: .95rem;
+    }
+    #song-list li:hover { background: #fce4ec; }
+    #song-list li.active {
+      background: #fce4ec;
+      color: #c2185b;
+      font-weight: 600;
+    }
+    #song-list li .num { color: #bbb; font-size: .8rem; min-width: 1.5rem; }
+    #song-list li .name { flex: 1; }
+    #song-list li .playing-icon { color: #e91e63; animation: bounce .6s infinite alternate; }
+    @keyframes bounce { from { transform: scaleY(.8); } to { transform: scaleY(1.2); } }
 
+    /* ── Текст пісні ─────────────────────────────────────────── */
     #lyrics {
-      margin-top:1.5rem; font-size:clamp(1.4rem,4vw,2.2rem);
-      line-height:2.2; text-align:center; max-width:720px;
+      font-size: clamp(1.3rem, 4vw, 2rem);
+      line-height: 2.4;
+      text-align: center;
+      width: 100%;
     }
-    .word { display:inline-block; color:#3a3a3a; transition:color .08s, transform .08s; }
-    .word.done   { color:#666; }
-    .word.active { color:#ff4081; transform:scale(1.18); font-weight:700; text-shadow:0 0 20px rgba(255,64,129,.5); }
+    .word {
+      display: inline-block;
+      color: #ccc;
+      transition: color .08s;
+      /* НЕ міняємо розмір — тільки колір */
+    }
+    .word.done   { color: #aaa; }
+    .word.active { color: #e91e63; font-weight: 700; }
+
+    /* ── ПІДВАЛ ──────────────────────────────────────────────── */
+    footer {
+      background: #fff;
+      border-top: 1px solid #e0e0e0;
+      padding: 1rem 2rem;
+      text-align: center;
+      font-size: .8rem;
+      color: #bbb;
+    }
   </style>
 </head>
 <body>
 
-  <div id="home-view" hidden>
-    <h1>Karaoke</h1>
-    <p class="sub">Create a room and share the link with friends</p>
-    <button id="create-btn">Create Room</button>
-  </div>
+  <!-- ── ШАПКА ──────────────────────────────────────────────── -->
+  <header>
+    <h1>Пісні</h1>
 
-  <div id="room-view" hidden>
-    <h1>Karaoke</h1>
-    <p id="room-url-label">Share this link with friends</p>
-    <div id="room-url" title="Click to copy"></div>
-    <div id="status"></div>
+    <!-- Динамік учасника (в шапці) -->
+    <label id="header-audio-toggle" hidden title="Грати музику на моєму пристрої">
+      <input type="checkbox" id="my-audio-check">
+      <span class="speaker">🔇</span>
+    </label>
+  </header>
 
-    <div class="btn-row">
-      <button id="play-btn"  hidden>Play</button>
-      <button id="pause-btn" hidden>Pause</button>
+  <!-- ── ОСНОВНИЙ КОНТЕНТ ────────────────────────────────────── -->
+  <main>
+
+    <!-- Головна сторінка -->
+    <div id="home-view" hidden>
+      <button id="create-btn" style="font-size:1.1rem;padding:1rem 3rem">🎵 Створити кімнату</button>
     </div>
 
-    <!-- Хост: увімкнути музику на всіх -->
-    <label id="sync-audio-label" class="audio-toggle" hidden>
-      <input type="checkbox" id="sync-audio-check">
-      <span>🎵 Play music on all connected devices</span>
-    </label>
+    <!-- Кімната -->
+    <div id="room-view" hidden style="width:100%;display:flex;flex-direction:column;align-items:center;gap:1.2rem">
 
-    <!-- Учасник: особиста галочка (натиск = user gesture + завантаження буферу) -->
-    <label id="my-audio-label" class="audio-toggle" hidden>
-      <input type="checkbox" id="my-audio-check">
-      <span>🔊 Play music on my device</span>
-    </label>
+      <p id="room-url-label">Поділіться посиланням з друзями</p>
+      <div id="room-url" title="Натисніть, щоб скопіювати"></div>
 
-    <!-- Показується після завантаження буферу -->
-    <div id="ready-badge" hidden>✓ Audio ready</div>
+      <div id="status"></div>
 
-    <div id="lyrics"></div>
-  </div>
+      <!-- Список пісень (хост) -->
+      <div id="song-picker" hidden>
+        <div id="song-picker-title">Виберіть пісню</div>
+        <ul id="song-list"></ul>
+      </div>
+
+      <!-- Кнопки керування (хост) -->
+      <div class="btn-row">
+        <button id="play-btn"  hidden>▶ Грати</button>
+        <button id="pause-btn" hidden>⏸ Пауза</button>
+      </div>
+
+      <!-- Галочка хоста -->
+      <label id="sync-audio-label" hidden>
+        <input type="checkbox" id="sync-audio-check">
+        📻 Грати музику на всіх пристроях
+      </label>
+
+      <!-- Текст пісні -->
+      <div id="lyrics"></div>
+    </div>
+
+  </main>
+
+  <!-- ── ПІДВАЛ ──────────────────────────────────────────────── -->
+  <footer>
+    © 2026 Зміст роки підзні · Всі права захищені
+  </footer>
 
   <script src="/app.js"></script>
 </body>
