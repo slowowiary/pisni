@@ -81,24 +81,18 @@ function unlockAudio() {
 }
 
 // Завантажує MP3. Якщо вже завантажений — повертає кеш.
-// Якщо вже завантажується та сама — чекає.
 // FIX: скидає audioBuffer якщо пісня змінилась
-// FIX: автоматично повторює завантаження до 3 разів при помилці мережі
-async function ensureBuffer(song, attempt = 1) {
-  const MAX_ATTEMPTS = 3;
+async function ensureBuffer(song) {
   // Вже є правильний буфер
   if (audioBuffer && currentSong === song) return audioBuffer;
   // Якщо буфер від іншої пісні — скидаємо
-  if (audioBuffer && currentSong !== song) {
-    audioBuffer = null;
-  }
+  if (audioBuffer && currentSong !== song) audioBuffer = null;
   initAudio();
   loadingSong = song;
   try {
     const res = await fetch('/songs/' + song + '/' + song + '.mp3');
     if (!res.ok) throw new Error('MP3 not found: ' + song);
     const arr = await res.arrayBuffer();
-    // Перевіряємо що поки завантажували — пісня не змінилась
     if (loadingSong !== song) throw new Error('Song changed during load');
     audioBuffer = await new Promise((ok, fail) => audioCtx.decodeAudioData(arr, ok, fail));
     loadingSong = null;
@@ -106,17 +100,6 @@ async function ensureBuffer(song, attempt = 1) {
   } catch (e) {
     loadingSong = null;
     audioBuffer = null;
-    // Якщо пісня змінилась — не повторюємо
-    if (e.message === 'Song changed during load') throw e;
-    // Якщо файл не знайдено — не повторюємо (404)
-    if (e.message.startsWith('MP3 not found')) throw e;
-    // Мережева помилка — повторюємо
-    if (attempt < MAX_ATTEMPTS) {
-      const delay = attempt * 1500; // 1.5s, 3s між спробами
-      setStatus(`⚠ Помилка завантаження, спроба ${attempt + 1}/${MAX_ATTEMPTS}…`);
-      await new Promise(r => setTimeout(r, delay));
-      return ensureBuffer(song, attempt + 1);
-    }
     throw e;
   }
 }
@@ -686,22 +669,9 @@ async function doPlay(song) {
   resetScroll(); setStatus(''); startAnim(); startScroll();
 
   if (role === 'host') {
-    if (!audioBuffer || currentSong !== song) {
-      setStatus('⏳ Завантаження…');
-      try {
-        await ensureBuffer(song);
-        setStatus('');
-      } catch (e) {
-        // Скидаємо стан — хост може натиснути "Грати" ще раз без оновлення сторінки
-        playing = false; paused = false;
-        playBtn.hidden = false; playBtn.textContent = '▶ Грати';
-        pauseBtn.hidden = true;
-        lyricsCont.hidden = true;
-        stopAnim(); stopScroll(); clearHL(); highlightSong(song, false);
-        setStatus('⚠ ' + e.message + ' — натисніть «Грати» ще раз');
-        return;
-      }
-    }
+    // Буфер вже завантажено у playBtn handler до відправки команди play
+    // Якщо з якоїсь причини буфер відсутній — тихо виходимо
+    if (!audioBuffer) { setStatus('⚠ Буфер не завантажено'); return; }
     // Хост: resync перед стартом — є 3 секунди запасу
     await resync(5);
     scheduleAudio();
@@ -734,11 +704,30 @@ async function doPlay(song) {
 // =============================================================================
 // Контроли хоста
 // =============================================================================
-playBtn?.addEventListener('click', () => {
+playBtn?.addEventListener('click', async () => {
   if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host') return;
-  // FIX: завжди передаємо currentSong при play
-  if (!playing) ws.send(JSON.stringify({ type: 'play', song: currentSong || songs[0] || 'test' }));
-  else ws.send(JSON.stringify({ type: 'stop' }));
+  if (playing) {
+    ws.send(JSON.stringify({ type: 'stop' }));
+    return;
+  }
+  // Спочатку завантажуємо буфер — тільки після успіху надсилаємо play
+  // Якщо відправити play до завантаження — всі учасники отримають команду,
+  // але хост може зламатись при завантаженні і десинхронізуватись
+  const song = currentSong || songs[0] || 'test';
+  if (!audioBuffer || currentSong !== song) {
+    setStatus('⏳ Завантаження…');
+    playBtn.disabled = true;
+    try {
+      await ensureBuffer(song);
+      setStatus('');
+    } catch (e) {
+      playBtn.disabled = false;
+      setStatus('⚠ ' + e.message + ' — натисніть «Грати» ще раз');
+      return;
+    }
+    playBtn.disabled = false;
+  }
+  ws.send(JSON.stringify({ type: 'play', song }));
 });
 
 pauseBtn?.addEventListener('click', () => {
