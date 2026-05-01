@@ -83,7 +83,9 @@ function unlockAudio() {
 // Завантажує MP3. Якщо вже завантажений — повертає кеш.
 // Якщо вже завантажується та сама — чекає.
 // FIX: скидає audioBuffer якщо пісня змінилась
-async function ensureBuffer(song) {
+// FIX: автоматично повторює завантаження до 3 разів при помилці мережі
+async function ensureBuffer(song, attempt = 1) {
+  const MAX_ATTEMPTS = 3;
   // Вже є правильний буфер
   if (audioBuffer && currentSong === song) return audioBuffer;
   // Якщо буфер від іншої пісні — скидаємо
@@ -92,14 +94,31 @@ async function ensureBuffer(song) {
   }
   initAudio();
   loadingSong = song;
-  const res = await fetch('/songs/' + song + '/' + song + '.mp3');
-  if (!res.ok) throw new Error('MP3 not found: ' + song);
-  const arr = await res.arrayBuffer();
-  // Перевіряємо що поки завантажували — пісня не змінилась
-  if (loadingSong !== song) throw new Error('Song changed during load');
-  audioBuffer = await new Promise((ok, fail) => audioCtx.decodeAudioData(arr, ok, fail));
-  loadingSong = null;
-  return audioBuffer;
+  try {
+    const res = await fetch('/songs/' + song + '/' + song + '.mp3');
+    if (!res.ok) throw new Error('MP3 not found: ' + song);
+    const arr = await res.arrayBuffer();
+    // Перевіряємо що поки завантажували — пісня не змінилась
+    if (loadingSong !== song) throw new Error('Song changed during load');
+    audioBuffer = await new Promise((ok, fail) => audioCtx.decodeAudioData(arr, ok, fail));
+    loadingSong = null;
+    return audioBuffer;
+  } catch (e) {
+    loadingSong = null;
+    audioBuffer = null;
+    // Якщо пісня змінилась — не повторюємо
+    if (e.message === 'Song changed during load') throw e;
+    // Якщо файл не знайдено — не повторюємо (404)
+    if (e.message.startsWith('MP3 not found')) throw e;
+    // Мережева помилка — повторюємо
+    if (attempt < MAX_ATTEMPTS) {
+      const delay = attempt * 1500; // 1.5s, 3s між спробами
+      setStatus(`⚠ Помилка завантаження, спроба ${attempt + 1}/${MAX_ATTEMPTS}…`);
+      await new Promise(r => setTimeout(r, delay));
+      return ensureBuffer(song, attempt + 1);
+    }
+    throw e;
+  }
 }
 
 function clearBuffer() {
@@ -224,7 +243,7 @@ function schedulePostStartCorrections() {
     const t = setTimeout(() => checkAndCorrect(), delay);
     correctionTimers.push(t);
   });
-  // Потім кожні 20 секунд — щоб дрейф не накопичувався
+  // Потім кожні 10 секунд — щоб дрейф не накопичувався
   startPeriodicSync();
 }
 
@@ -235,7 +254,7 @@ function startPeriodicSync() {
     // 3 заміри для точного offset, потім перевірка дрейфу
     await resync(3);
     await checkAndCorrect();
-  }, 20000);
+  }, 10000);
 }
 
 function stopPeriodicSync() {
@@ -668,7 +687,20 @@ async function doPlay(song) {
 
   if (role === 'host') {
     if (!audioBuffer || currentSong !== song) {
-      try { await ensureBuffer(song); } catch (e) { setStatus('⚠ ' + e.message); return; }
+      setStatus('⏳ Завантаження…');
+      try {
+        await ensureBuffer(song);
+        setStatus('');
+      } catch (e) {
+        // Скидаємо стан — хост може натиснути "Грати" ще раз без оновлення сторінки
+        playing = false; paused = false;
+        playBtn.hidden = false; playBtn.textContent = '▶ Грати';
+        pauseBtn.hidden = true;
+        lyricsCont.hidden = true;
+        stopAnim(); stopScroll(); clearHL(); highlightSong(song, false);
+        setStatus('⚠ ' + e.message + ' — натисніть «Грати» ще раз');
+        return;
+      }
     }
     // Хост: resync перед стартом — є 3 секунди запасу
     await resync(5);
@@ -680,18 +712,19 @@ async function doPlay(song) {
       stopNode();
       clearBuffer();
       setStatus('⏳ Завантаження…');
-      // Паралельно завантажуємо буфер І робимо перші заміри часу —
-      // щоб не втрачати час поки качається MP3
       try {
-        const [buf] = await Promise.all([
+        await Promise.all([
           ensureBuffer(song),
-          resync(4),   // перші 4 заміри під час завантаження
+          resync(4),
         ]);
         setStatus('');
-      } catch (e) { setStatus('⚠ ' + e.message); return; }
+      } catch (e) {
+        stopNode(); clearBuffer();
+        setStatus('⚠ ' + e.message);
+        return;
+      }
     }
     // Після завантаження — ще 4 заміри вже з точним offset
-    // (перші могли бути зроблені до кінця завантаження — offset міг змінитись)
     await resync(4);
     scheduleAudio();
     schedulePostStartCorrections();
