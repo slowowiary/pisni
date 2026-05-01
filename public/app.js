@@ -132,6 +132,7 @@ async function scheduleAudio() {
   src.connect(gainNode);
   src.start(when, off);
   sourceNode = src;
+  _rate = 1.0; // починаємо з нормальної швидкості після кожного (пере)запуску
   src.onended = () => {
     if (sourceNode === src) { sourceNode = null; if (role === 'host' && playing) songEnded(); }
   };
@@ -143,6 +144,7 @@ function stopNode() {
     try { sourceNode.disconnect(); } catch {}
     sourceNode = null;
   }
+  _resetRate();
 }
 
 function songEnded() {
@@ -166,18 +168,20 @@ function addSample(srvTime, t0) {
   const sorted  = [...clockSamples].sort((a, b) => a.rtt - b.rtt);
   const use     = sorted.slice(0, Math.max(1, Math.floor(sorted.length * 0.7)));
   const minRtt  = use[0].rtt;
-  let ws = 0, os = 0;
-  for (const s of use) { const w = minRtt / s.rtt; ws += w; os += s.off * w; }
-  offset = os / ws;
+  let wsum = 0, osum = 0;
+  for (const s of use) { const w = minRtt / s.rtt; wsum += w; osum += s.off * w; }
+  offset = osum / wsum;
 }
 
-// Початкова синхронізація при вході
+// Початкова синхронізація при вході — 4 HTTP замірів достатньо.
+// Точніший offset потрібен тільки якщо пісня вже грає; але тоді
+// доробляємо заміри в doPlay() паралельно з завантаженням буфера.
 async function syncOnEntry(id) {
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 4; i++) {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${id}/time`).catch(() => null);
-    if (res?.ok) addSample((await res.json()).serverTime, t0);
-    if (i < 7) await new Promise(r => setTimeout(r, 20));
+    _dbReqs++; if (res?.ok) addSample((await res.json()).serverTime, t0);
+    if (i < 3) await new Promise(r => setTimeout(r, 30));
   }
 }
 
@@ -187,92 +191,280 @@ async function resync(count = 5) {
   for (let i = 0; i < count; i++) {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
+    _dbReqs++;
     if (res?.ok) addSample((await res.json()).serverTime, t0);
     if (i < count - 1) await new Promise(r => setTimeout(r, 30));
   }
 }
 
-// Поточна позиція відтворення в секундах
+// =============================================================================
+// Поточна позиція аудіо
+// =============================================================================
+// audioCtx.currentTime — стабільний монотонний лічильник, не залежить від
+// jitter Event Loop на відміну від Date.now(). Використовуємо його для позиції.
 function getActualPos() {
   if (!sourceNode || !audioCtx) return null;
   return sourceNode._off + (audioCtx.currentTime - sourceNode._when);
 }
 
-// Перевірка дрейфу і корекція якщо потрібно (ціль: < 20ms)
-async function checkAndCorrect() {
-  if (!playing || paused || startTime === null) return;
-  const t0  = Date.now();
-  const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
-  if (!res?.ok) return;
-  addSample((await res.json()).serverTime, t0);
-  const expected = (serverNow() - startTime) / 1000;
-  const actual   = getActualPos();
-  if (actual === null) { scheduleAudio(); return; }
-  const drift = Math.abs(actual - expected);
-  if (drift > 0.020) { // > 20ms — коригуємо (було 30ms)
-    scheduleAudio();
+// =============================================================================
+// Адаптивна корекція playbackRate
+// =============================================================================
+//
+// ГОЛОВНА ІДЕЯ:
+//   Замість жорстких seek-ів (перемотка) — плавна зміна швидкості відтворення.
+//   Це непомітно для слуху і не викликає стрибків.
+//
+//   Формула:  targetRate = 1 + clamp(error / WINDOW, -MAX, +MAX)
+//     error > 0: відстаємо  → rate > 1 (прискорюємо)
+//     error < 0: поспішаємо → rate < 1 (сповільнюємо)
+//
+//   Зміна плавна через LERP: rate += (target - rate) * LERP
+//   Застосовується через linearRampToValueAtTime (Web Audio API) — без клацань.
+//
+//   Seek робиться ТІЛЬКИ при великому рассинхроні (> 150 мс).
+
+const _SYNC_WINDOW = 4.0;  // секунди — вікно корекції (більше = повільніше але плавніше)
+const _SYNC_MAX    = 0.02; // ±2% максимальне відхилення швидкості
+const _SYNC_LERP   = 0.18; // коефіцієнт LERP за один крок (вище = швидше але грубіше)
+const _SYNC_DEAD   = 5e-4; // мертва зона: зміна менша за це — ігноруємо
+
+let _rate      = 1.0;   // поточна встановлена швидкість
+let _rateTimer = null;  // таймер плавної рампи
+
+// Один крок LERP до target
+function _stepRate(target) {
+  const clamped = Math.max(1 - _SYNC_MAX, Math.min(1 + _SYNC_MAX, target));
+  const diff    = clamped - _rate;
+  if (Math.abs(diff) < _SYNC_DEAD) return;
+  _rate += diff * _SYNC_LERP;
+  if (sourceNode?.playbackRate && audioCtx) {
+    sourceNode.playbackRate.linearRampToValueAtTime(_rate, audioCtx.currentTime + 0.25);
   }
+  _dbRefresh();
 }
 
-// Планує серію корекцій після старту + постійний інтервал кожні 20с
+// Запускає плавний цикл (~12 fps) поки не досягнемо target або sourceNode зникне
+function _rampTo(target) {
+  if (_rateTimer) { clearInterval(_rateTimer); _rateTimer = null; }
+  let steps = 0;
+  _rateTimer = setInterval(() => {
+    if (!sourceNode || !playing || paused) { clearInterval(_rateTimer); _rateTimer = null; return; }
+    _stepRate(target);
+    if (++steps > 35 || Math.abs(_rate - target) < _SYNC_DEAD) {
+      clearInterval(_rateTimer); _rateTimer = null;
+    }
+  }, 80);
+}
+
+// Скидає rate до 1.0 (при зупинці / паузі / seek)
+function _resetRate() {
+  _rate = 1.0;
+  if (_rateTimer) { clearInterval(_rateTimer); _rateTimer = null; }
+  if (sourceNode?.playbackRate && audioCtx) {
+    sourceNode.playbackRate.cancelScheduledValues(audioCtx.currentTime);
+    sourceNode.playbackRate.setValueAtTime(1.0, audioCtx.currentTime);
+  }
+  _dbRefresh();
+}
+
+// =============================================================================
+// Головна функція корекції синхрону
+// =============================================================================
+//
+// СТРАТЕГІЯ:
+//   (A) |error| > 150 мс → seek (scheduleAudio) + одразу плавна доводка
+//   (B) |error| 20–150 мс → тільки playbackRate, БЕЗ seek
+//   (C) |error| 5–20 мс  → мінімальна м'яка корекція
+//   (D) |error| < 5 мс   → ідеально, плавно повертаємо до 1.0
+//
+// КЛЮЧОВІ ВИПРАВЛЕННЯ:
+//   1. Один HTTP запит на тік (не 4 як раніше)
+//   2. Після seek завжди перезапускаємо таймери (раніше вони вмирали!)
+//   3. clockSamples накопичується між тіками — offset стає точнішим з часом
+//
+// АДАПТАЦІЯ:
+//   Після seek: пріоритет — переконатись що все правильно (часті перевірки)
+//   При ідеальному синку: збільшуємо паузу до 40 с (економимо HTTP)
+
+let _dbLastErr  = null;  // для debug-панелі
+let _dbReqs     = 0;     // лічильник HTTP запитів
+let _dbEl       = null;  // DOM елемент панелі
+let _dbInterval = '—';   // поточний інтервал
+
+function _dbInit() {
+  _dbEl = document.createElement('div');
+  _dbEl.style.cssText = [
+    'position:fixed','bottom:4px','left:0','right:0','text-align:center',
+    'font-size:10px','color:#888','pointer-events:none','z-index:9999',
+    'font-family:monospace','letter-spacing:0.02em',
+  ].join(';');
+  document.body.appendChild(_dbEl);
+  _dbRefresh();
+}
+function _dbRefresh() {
+  if (!_dbEl) return;
+  const e = _dbLastErr;
+  const errStr = e !== null ? (e >= 0 ? '+' : '') + (e * 1000).toFixed(1) + ' ms' : '—';
+  const offStr = (offset >= 0 ? '+' : '') + offset.toFixed(0) + ' ms';
+  _dbEl.textContent =
+    'err: ' + errStr + '  |  rate: ' + _rate.toFixed(4) +
+    '  |  clk: ' + offStr + '  |  Δt: ' + _dbInterval + '  |  HTTP: ' + _dbReqs;
+}
+
+async function checkAndCorrect() {
+  if (!playing || paused || startTime === null) return;
+
+  // ОДИН HTTP запит — оновлює offset (не 4 як раніше!)
+  const t0  = Date.now();
+  const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
+  _dbReqs++;
+  if (!res?.ok) return;
+  addSample((await res.json()).serverTime, t0);
+
+  const targetPos = (serverNow() - startTime) / 1000;
+  const actualPos = getActualPos();
+
+  // sourceNode зник (ще не стартував або вже закінчився)
+  if (actualPos === null) {
+    scheduleAudio();
+    schedulePostStartCorrections(); // відновлюємо таймери
+    return;
+  }
+
+  const error    = targetPos - actualPos;
+  const absError = Math.abs(error);
+  _dbLastErr = error;
+  _dbRefresh();
+
+  // (A) Великий рассинхрон: seek + плавна доводка
+  if (absError > 0.150) {
+    _resetRate();
+    scheduleAudio();
+    schedulePostStartCorrections(); // ← КРИТИЧНО: після seek таймери треба перезапустити
+    return;
+  }
+  // (B) Середній: тільки playbackRate
+  if (absError > 0.020) {
+    _rampTo(1 + Math.max(-_SYNC_MAX, Math.min(_SYNC_MAX, error / _SYNC_WINDOW)));
+    return;
+  }
+  // (C) Малий: одна м'яка корекція
+  if (absError > 0.005) {
+    _stepRate(1 + Math.max(-_SYNC_MAX, Math.min(_SYNC_MAX, error / _SYNC_WINDOW)));
+    return;
+  }
+  // (D) Ідеально: повільно повертаємо до 1.0
+  _stepRate(1.0);
+}
+
+// =============================================================================
+// Адаптивний планувальник синхронізації
+// =============================================================================
+//
+// ЕКОНОМІЯ ЗАПИТІВ:
+//   Старий код: resync(3) + checkAndCorrect() кожні 10 с = 4 HTTP/тік
+//   Новий код:  checkAndCorrect() з адаптивним інтервалом = 1 HTTP/тік
+//
+//   При ідеальному синку (< 5 мс) інтервал зростає до 40 с.
+//   При дрейфі > 50 мс — повертається до 1 с.
+//
+//   Кількість запитів за 4-хв пісню:
+//   Старий: ~100 HTTP  |  Новий: ~15–25 HTTP  (залежно від якості мережі)
+
 let correctionTimers = [];
-let periodicSyncInterval = null;
+let _syncTimeout     = null;   // setTimeout (не setInterval — бо адаптивний)
+let _syncConsecOk    = 0;      // кількість послідовних "ідеальних" циклів
+let _syncMs          = 2000;   // поточний інтервал (мс)
+// Перемикачі для пришвидшення першого входу в синк
+let _syncFastPhase   = false;  // true = режим швидкого входу
+let _syncFastCount   = 0;      // кількість швидких тіків після seek
 
 function schedulePostStartCorrections() {
   correctionTimers.forEach(t => clearTimeout(t));
   correctionTimers = [];
-  // Дві перевірки після старту: 3s і 6s (раніше — пісня ще не грає або дрейф нульовий)
-  [3000, 6000].forEach(delay => {
-    const t = setTimeout(() => checkAndCorrect(), delay);
-    correctionTimers.push(t);
-  });
-  // Потім кожні 10 секунд — щоб дрейф не накопичувався
+  // Після старту або seek: режим швидкого входу (часті перевірки)
+  _syncFastPhase = true;
+  _syncFastCount = 0;
+  _syncConsecOk  = 0;
+  _syncMs        = 1000;
+  // Перша перевірка через 2.5 с (пісня точно вже грає)
+  correctionTimers.push(setTimeout(() => checkAndCorrect(), 2500));
   startPeriodicSync();
 }
 
 function startPeriodicSync() {
   stopPeriodicSync();
-  periodicSyncInterval = setInterval(async () => {
-    if (!playing || paused) return;
-    // 3 заміри для точного offset, потім перевірка дрейфу
-    await resync(3);
+
+  async function tick() {
+    if (!playing || paused) { _next(5000); return; }
     await checkAndCorrect();
-  }, 10000);
+
+    const absErr = _dbLastErr !== null ? Math.abs(_dbLastErr) : 0.1;
+
+    if (_syncFastPhase) {
+      // Режим швидкого входу: перші 6 тіків після старту/seek
+      // Мета: швидко увійти в синк за 5–8 секунд
+      _syncFastCount++;
+      if (absErr < 0.010) {
+        _syncConsecOk++;
+        _syncMs = 1500; // вже добре, злегка розгальмовуємо
+      } else {
+        _syncConsecOk = 0;
+        _syncMs = absErr > 0.050 ? 800 : 1200; // ще коригується
+      }
+      if (_syncFastCount >= 6) {
+        _syncFastPhase = false; // виходимо з режиму швидкого входу
+        _syncMs = 3000;
+      }
+    } else {
+      // Звичайний режим: адаптуємо інтервал по помилці
+      if (absErr < 0.005) {
+        // Ідеально → збільшуємо паузу (економимо HTTP)
+        _syncConsecOk++;
+        if      (_syncConsecOk >= 15) _syncMs = Math.min(_syncMs * 1.5, 40000); // до 40 с
+        else if (_syncConsecOk >= 8)  _syncMs = Math.min(_syncMs * 1.3, 20000); // до 20 с
+        else                          _syncMs = Math.min(_syncMs * 1.1, 8000);  // до 8 с
+      } else {
+        // Є дрейф → зменшуємо паузу
+        _syncConsecOk = 0;
+        if      (absErr > 0.050) _syncMs = 1000;
+        else if (absErr > 0.020) _syncMs = 2000;
+        else                     _syncMs = 4000;
+      }
+    }
+
+    _dbInterval = _syncMs >= 1000 ? (_syncMs / 1000).toFixed(1) + 's' : _syncMs + 'ms';
+    _dbRefresh();
+    _next(_syncMs);
+  }
+
+  function _next(ms) { _syncTimeout = setTimeout(() => tick().catch(console.error), ms); }
+  _next(_syncMs);
 }
 
 function stopPeriodicSync() {
-  if (periodicSyncInterval) {
-    clearInterval(periodicSyncInterval);
-    periodicSyncInterval = null;
-  }
+  if (_syncTimeout) { clearTimeout(_syncTimeout); _syncTimeout = null; }
 }
 
 function cancelCorrections() {
   correctionTimers.forEach(t => clearTimeout(t));
   correctionTimers = [];
   stopPeriodicSync();
+  _resetRate();
 }
 
 // =============================================================================
 // Wake Lock
 // =============================================================================
 async function requestWakeLock() {
-  if (!('wakeLock' in navigator)) return;
-  // Не запитуємо повторно якщо вже активний
-  if (wakeLock && !wakeLock.released) return;
-  try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+  if ('wakeLock' in navigator) {
+    try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+  }
 }
-function releaseWakeLock() {
-  // Хост тримає wake lock постійно — не відпускаємо під час сесії
-  if (role === 'host') return;
-  if (wakeLock) { wakeLock.release(); wakeLock = null; }
-}
+function releaseWakeLock() { if (wakeLock) { wakeLock.release(); wakeLock = null; } }
 document.addEventListener('visibilitychange', () => {
-  // Браузер скасовує wake lock при переході вкладки у фон —
-  // відновлюємо як тільки вкладка знову стає активною.
-  // Для хоста — завжди; для клієнта — тільки під час відтворення.
-  if (document.visibilityState !== 'visible') return;
-  if (role === 'host' || (playing && !paused)) requestWakeLock();
+  if (document.visibilityState === 'visible' && playing && !paused) requestWakeLock();
 });
 
 // =============================================================================
@@ -374,7 +566,7 @@ if (headerToggle) {
     updateSpeakerUI();
     // Якщо вмикаємо звук під час відтворення — синхронізуємось
     if (!isMuted && syncAudioEnabled && audioUnlocked && playing && !paused && startTime !== null) {
-      resync(4).then(() => { scheduleAudio(); schedulePostStartCorrections(); });
+      resync(2).then(() => { scheduleAudio(); schedulePostStartCorrections(); });
     } else if (isMuted) {
       stopNode();
     }
@@ -394,6 +586,7 @@ function getClientId() {
 // Boot
 // =============================================================================
 async function init() {
+  _dbInit();
   const p = new URLSearchParams(location.search).get('p');
   if (p) history.replaceState(null, '', p);
   await loadSongList();
@@ -516,7 +709,6 @@ async function handleMsg(msg) {
         syncAudioEnabled = saved;
         if (saved) ws.send(JSON.stringify({ type: 'sync_audio', enabled: true }));
         setStatus('Виберіть пісню зі списку нижче.');
-        requestWakeLock(); // хост: тримаємо екран активним увесь час сесії
 
       } else {
         // Клієнт
@@ -575,8 +767,8 @@ async function handleMsg(msg) {
       setStatus('');
       if (role === 'host') { pauseBtn.textContent = '⏸ Пауза'; }
       if (role === 'host' || (syncAudioEnabled && audioUnlocked && audioBuffer && !isMuted)) {
-        // FIX: 5 замірів (було 3) — пауза могла "розбити" offset
-        await resync(5);
+        // 3 заміри після паузи — достатньо
+        await resync(3);
         scheduleAudio();
         schedulePostStartCorrections();
       }
@@ -627,7 +819,7 @@ async function handleMsg(msg) {
               // Паралельно: завантажуємо буфер + перші заміри
               await Promise.all([
                 ensureBuffer(currentSong),
-                resync(4),
+                resync(3),
               ]);
               setStatus('');
             } catch (e) {
@@ -635,8 +827,8 @@ async function handleMsg(msg) {
             }
           }
           if (playing && !paused && startTime !== null) {
-            // Після завантаження — ще заміри для точного старту "на льоту"
-            await resync(4);
+            // 2 додаткових заміри після завантаження
+            await resync(2);
             scheduleAudio();
             schedulePostStartCorrections();
           }
@@ -688,8 +880,8 @@ async function doPlay(song) {
   resetScroll(); setStatus(''); startAnim(); startScroll();
 
   if (role === 'host') {
-    // Хост: resync перед стартом — є 3 секунди запасу
-    await resync(5);
+    // Хост: 3 заміри — є 3 секунди запасу, достатньо для ±10 мс
+    await resync(3);
     scheduleAudio();
     schedulePostStartCorrections();
 
@@ -701,7 +893,7 @@ async function doPlay(song) {
       try {
         await Promise.all([
           ensureBuffer(song),
-          resync(4),
+          resync(3),
         ]);
         setStatus('');
       } catch (e) {
@@ -710,8 +902,8 @@ async function doPlay(song) {
         return;
       }
     }
-    // Після завантаження — ще 4 заміри вже з точним offset
-    await resync(4);
+    // Після завантаження — 2 додаткових заміри (вже є 3 з паралельного)
+    await resync(2);
     scheduleAudio();
     schedulePostStartCorrections();
   }
