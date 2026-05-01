@@ -132,7 +132,7 @@ async function scheduleAudio() {
   src.connect(gainNode);
   src.start(when, off);
   sourceNode = src;
-  _rate = 1.0; _smoothE = 0; // скидаємо після кожного (пере)запуску
+  pll.rate = 1.0; // після кожного (пере)запуску починаємо з 1.0
   src.onended = () => {
     if (sourceNode === src) { sourceNode = null; if (role === 'host' && playing) songEnded(); }
   };
@@ -144,7 +144,7 @@ function stopNode() {
     try { sourceNode.disconnect(); } catch {}
     sourceNode = null;
   }
-  _resetRate();
+  _pllReset(true); // зберігаємо integral при зупинці
 }
 
 function songEnded() {
@@ -199,114 +199,111 @@ async function resync(count = 3) {
 // =============================================================================
 // Поточна позиція аудіо
 // =============================================================================
-// audioCtx.currentTime — монотонний лічильник без jitter Event Loop.
 function getActualPos() {
   if (!sourceNode || !audioCtx) return null;
   return sourceNode._off + (audioCtx.currentTime - sourceNode._when);
 }
 
 // =============================================================================
-// Learned Rate — пам'ять пристрою між сесіями (localStorage)
+// PLL — Phase-Locked Loop (фазова петля синхронізації)
 // =============================================================================
-// Кожен телефон має мікроскопічний drift oscillator-а (±50–200 ppm).
-// Ми накопичуємо виміряний середній error і зберігаємо "базову" швидкість.
-// При наступному запуску пристрій одразу стартує з правильним rate.
 //
-// Алгоритм: EMA з alpha=0.08 (дуже повільне навчання — не реагує на jitter).
-// Оновлюється тільки коли variance останніх вимірів мала (стабільний drift).
+// Та сама технологія що в GPS, цифровому ТБ, і NTP (мережева синхронізація).
+//
+// Класичний PI-регулятор:
+//   output = Kp * error + Ki * integral(error)
+//
+//   Kp (пропорційна) — реагує на поточну помилку
+//   Ki (інтегральна) — компенсує постійний drift пристрою
+//
+// Як це вирішує проблему скачків:
+//   - Пропорційна частина дає НЕВЕЛИКУ реакцію на error (Kp мала)
+//   - Інтегральна накопичує суму помилок → виявляє постійний drift
+//   - Коли drift виявлено — integral тягне rate до потрібного значення
+//   - Система сама "знаходить" правильний rate без перерегулювання
+//
+// Аналогія: круїз-контроль в авто. Він не тисне різко газ при підйомі,
+// а поступово збільшує тиск і "запам'ятовує" скільки треба для цього підйому.
+//
+// Налаштування:
+//   Kp=0.04  — маленька пропорційна реакція (не перелітаємо)
+//   Ki=0.008 — повільне накопичення інтеграла (стійкість)
+//   Обидва підібрані так щоб система збіглась за ~10–20 с
+//
+// Learned rate (localStorage):
+//   integral зберігається між сесіями → наступний запуск вже скомпенсований.
 
-const _LR_KEY = 'k_lr2';  // localStorage key
+// PLL стан
+const pll = {
+  integral:  0,      // накопичена сума помилок (секунди)
+  prevError: null,   // попередній error для розрахунку похідної
+  rate:      1.0,    // поточний встановлений playbackRate
+  Kp:        0.04,   // пропорційний коефіцієнт
+  Ki:        0.008,  // інтегральний коефіцієнт
+};
 
-function _lrGet() {
+// Межі інтегратора: ±0.015 → rate ніколи не вийде за ±1.5%
+const PLL_IMAX  = 0.015;
+// Мертва зона: якщо |error| < 8 мс — не рухаємо rate взагалі
+const PLL_DEAD  = 0.008;
+// Seek тільки при дуже великому рассинхроні
+const PLL_SEEK  = 0.120;
+
+// Зберігаємо integral в localStorage → пристрій "пам'ятає" свій drift
+const _PLL_KEY = 'k_pll_i';
+
+function _pllSave() {
+  try { localStorage.setItem(_PLL_KEY, pll.integral.toFixed(8)); } catch {}
+}
+function _pllLoad() {
   try {
-    const v = parseFloat(localStorage.getItem(_LR_KEY) || '1');
-    return (isFinite(v) && v >= 0.9950 && v <= 1.0050) ? v : 1.0;
-  } catch { return 1.0; }
+    const v = parseFloat(localStorage.getItem(_PLL_KEY) || '0');
+    if (isFinite(v) && Math.abs(v) <= PLL_IMAX) return v;
+  } catch {}
+  return 0;
 }
 
-function _lrSet(errorSec) {
-  // Перетворюємо error у поправку rate.
-  // Ділимо на велике число (120) — дуже повільна адаптація.
-  // Це захищає від перенавчання при тимчасових збоях мережі.
-  const cur = _lrGet();
-  const upd = cur + (errorSec / 120.0) * 0.08;
-  const v   = Math.max(0.9950, Math.min(1.0050, upd));
-  try { localStorage.setItem(_LR_KEY, v.toFixed(8)); } catch {}
-  return v;
-}
-
-// =============================================================================
-// Статистика drift (ковзне вікно 6 вимірів)
-// =============================================================================
-// Зберігаємо останні 6 вимірів error (секунди).
-// median()  — стійкий до викидів (jitter не псує картину)
-// variance() — дисперсія: мала = стабільний drift, велика = jitter
-
-const _W = [];  // вікно вимірів
-
-function _wPush(e)    { _W.push(e); if (_W.length > 6) _W.shift(); }
-function _wMedian()   {
-  if (!_W.length) return 0;
-  const s = [..._W].sort((a,b) => a-b);
-  const m = s.length >> 1;
-  return s.length % 2 ? s[m] : (s[m-1]+s[m])/2;
-}
-function _wVariance() {
-  if (_W.length < 2) return 999;
-  const mn = _W.reduce((a,b)=>a+b,0)/_W.length;
-  return _W.reduce((a,b)=>a+(b-mn)**2,0)/_W.length;
-}
-
-// =============================================================================
-// Плавна корекція playbackRate (без перерегулювання)
-// =============================================================================
-//
-// ГОЛОВНА ПРИЧИНА "скачків" у попередній версії:
-//   Система бачила error +15 мс → встановлювала rate 1.005 → за 3 с
-//   надолужувала +15 мс, але за цей час приходив новий вимір і
-//   знову ставила rate — перелітала в -8 мс. Цикл повторювався.
-//
-// РІШЕННЯ — двокрокова корекція:
-//
-//   Крок 1: розраховуємо СКІЛЬКИ треба скоригувати (не rate, а delta позиції)
-//     correctionSec = smoothedError (EMA від кількох вимірів)
-//
-//   Крок 2: ділимо корекцію на ВІКНО КОРЕКЦІЇ (часовий горизонт)
-//     rate = 1 + correctionSec / windowSec
-//     window = 8 с (дуже повільно, але без перельоту)
-//
-//   Крок 3: rate НЕ міняємо до наступного виміру.
-//     Він діє весь інтервал між перевірками (Δt).
-//     Коли Δt велике (30–60 с) — вікно корекції збільшується автоматично.
-//
-//   Результат: система "знає" що за windowSec вона виправить помилку
-//   рівно на correctionSec — без перельоту.
-//
-// МЕРТВА ЗОНА: ±10 мс рахується "добре" — rate не змінюємо взагалі.
-// LEARNED RATE: базова швидкість = learnedRate пристрою.
-//   target = learnedRate + correctionSec / window
-
-let _lr      = 1.0;   // learned rate, завантажується при старті
-let _rate    = 1.0;   // поточний встановлений rate
-let _smoothE = 0;     // EMA від error (для плавності)
-let _rTimer  = null;  // таймер рампи
-
-// Встановлює rate через linearRamp (плавно, без артефактів)
-function _setRate(r) {
-  const safe = Math.max(0.980, Math.min(1.020, r));
-  if (Math.abs(safe - _rate) < 0.00005) return;  // мікрозміна — ігноруємо
-  _rate = safe;
-  if (sourceNode?.playbackRate && audioCtx) {
-    // Рампа на 1 с — повільна, непомітна зміна швидкості
-    sourceNode.playbackRate.linearRampToValueAtTime(_rate, audioCtx.currentTime + 1.0);
+// Один крок PLL: приймає error (секунди), повертає новий rate
+// dtSec — час з попереднього виміру (для інтеграла)
+function _pllStep(errorSec, dtSec) {
+  // Мертва зона: малий error ігноруємо повністю
+  if (Math.abs(errorSec) < PLL_DEAD) {
+    // Але інтеграл продовжує "остигати" до нуля (запобігає накопиченню)
+    pll.integral *= (1 - pll.Ki * 0.1);
+    return pll.rate; // не змінюємо rate
   }
-  _dbRefresh();
+
+  // Інтегральна частина: ∫ error dt
+  // Обмежуємо (anti-windup) щоб не накопичувалось нескінченно
+  pll.integral = Math.max(-PLL_IMAX,
+    Math.min(PLL_IMAX, pll.integral + errorSec * dtSec * pll.Ki));
+
+  // PI вихід = Kp*error + Ki*integral
+  const output = pll.Kp * errorSec + pll.integral;
+
+  // Обмежуємо відхилення rate до ±2%
+  const newRate = Math.max(0.980, Math.min(1.020, 1.0 + output));
+
+  // Плавна зміна через linearRamp (1 секунда) — без клацань
+  if (Math.abs(newRate - pll.rate) > 0.00005) {
+    pll.rate = newRate;
+    if (sourceNode?.playbackRate && audioCtx) {
+      sourceNode.playbackRate.linearRampToValueAtTime(
+        pll.rate, audioCtx.currentTime + 1.0
+      );
+    }
+  }
+
+  // Зберігаємо integral — це "пам'ять" про drift пристрою
+  _pllSave();
+
+  return pll.rate;
 }
 
-function _resetRate() {
-  _rate    = 1.0;
-  _smoothE = 0;
-  if (_rTimer) { clearInterval(_rTimer); _rTimer = null; }
+function _pllReset(keepIntegral) {
+  if (!keepIntegral) pll.integral = 0;
+  pll.prevError = null;
+  pll.rate      = 1.0;
   if (sourceNode?.playbackRate && audioCtx) {
     sourceNode.playbackRate.cancelScheduledValues(audioCtx.currentTime);
     sourceNode.playbackRate.setValueAtTime(1.0, audioCtx.currentTime);
@@ -314,33 +311,30 @@ function _resetRate() {
   _dbRefresh();
 }
 
-// Обчислює і встановлює правильний rate на основі error і Δt
-// intervalSec — час до наступної перевірки (секунди)
-function _calcAndSetRate(errorSec, intervalSec) {
-  // EMA від error: alpha=0.4 — достатньо швидка реакція, але без шуму
-  _smoothE = _smoothE * 0.6 + errorSec * 0.4;
+// =============================================================================
+// Ковзне вікно вимірів (медіана для стійкості до jitter)
+// =============================================================================
+// Зберігаємо 5 останніх вимірів error.
+// Медіана відкидає викиди (мережевий jitter) краще ніж середнє.
 
-  // Мертва зона ±10 мс: вважаємо "ідеально" — тільки learned rate
-  if (Math.abs(_smoothE) < 0.010) {
-    _setRate(_lr);
-    return;
-  }
-
-  // Вікно корекції = MAX(intervalSec * 2, 8 с)
-  // Якщо Δt велике (30 с) — вікно 60 с → дуже плавна корекція
-  // Якщо Δt мале (1 с) — вікно 8 с → трохи швидша, але все одно плавна
-  const window = Math.max(intervalSec * 2, 8);
-
-  // target = learnedRate + поправка
-  // Поправка = smoothedError / window (наскільки відхилитись від норми)
-  const correction = Math.max(-0.015, Math.min(0.015, _smoothE / window));
-  _setRate(_lr + correction);
+const _mw = [];
+function _mwPush(e)   { _mw.push(e); if (_mw.length > 5) _mw.shift(); }
+function _mwMedian()  {
+  if (!_mw.length) return 0;
+  const s = [..._mw].sort((a,b) => a-b);
+  return s[Math.floor(s.length/2)];
+}
+function _mwSpread()  {
+  // Розкид = max - min: якщо великий — вимір ненадійний (jitter)
+  if (_mw.length < 3) return 999;
+  const s = [..._mw].sort((a,b) => a-b);
+  return s[s.length-1] - s[0];
 }
 
 // =============================================================================
 // Debug-панель
 // =============================================================================
-let _dbEl  = null, _dbReqs = 0, _dbLastE = null, _dbDt = '—';
+let _dbEl = null, _dbReqs = 0, _dbLastE = null, _dbDt = '—', _dbPrevTs = null;
 
 function _dbInit() {
   _dbEl = document.createElement('div');
@@ -356,12 +350,12 @@ function _dbRefresh() {
   if (!_dbEl) return;
   const e  = _dbLastE;
   const es = e !== null ? (e>=0?'+':'')+(e*1000).toFixed(1)+' ms' : '—';
-  const ms = (e !== null && Math.abs(e) <= 0.010) ? ' ✓' : '';
+  const ok = e !== null && Math.abs(e) <= PLL_DEAD;
+  const ii = (pll.integral*1000).toFixed(2);
   _dbEl.textContent =
-    'err: '+es+ms+
-    '  smooth: '+(_smoothE*1000).toFixed(1)+'ms'+
-    '  rate: '+_rate.toFixed(6)+
-    '  lr: '+_lr.toFixed(6)+
+    'err: '+es+(ok?' ✓':'')+
+    '  ∫: '+ii+'ms'+
+    '  rate: '+pll.rate.toFixed(6)+
     '  clk: '+(offset>=0?'+':'')+offset.toFixed(0)+'ms'+
     '  Δt: '+_dbDt+
     '  HTTP: '+_dbReqs;
@@ -370,19 +364,14 @@ function _dbRefresh() {
 // =============================================================================
 // Головна функція корекції
 // =============================================================================
-//
-// Рівні реакції:
-//   |error| > 80 мс  → seek (одноразовий ривок, потім плавна корекція)
-//   |error| ≤ 80 мс  → тільки rate (ніяких seek, плавно)
-//   |error| ≤ 10 мс  → "добре", rate = learnedRate (без корекції)
-//
-// Learned rate оновлюється при стабільному дрейфі (variance мала).
-// Це накопичується між сесіями — телефон стає точнішим з часом.
-
-async function checkAndCorrect(intervalSec) {
+async function checkAndCorrect() {
   if (!playing || paused || startTime === null) return;
 
-  const t0  = Date.now();
+  const now = Date.now();
+  const dtSec = _dbPrevTs !== null ? (now - _dbPrevTs) / 1000 : 4;
+  _dbPrevTs = now;
+
+  const t0  = now;
   const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
   _dbReqs++;
   if (!res?.ok) return;
@@ -392,108 +381,90 @@ async function checkAndCorrect(intervalSec) {
   const act = getActualPos();
   if (act === null) { await scheduleAudio(); schedulePostStartCorrections(); return; }
 
-  const err   = tgt - act;
-  const abErr = Math.abs(err);
-
-  _wPush(err);
-  _dbLastE = err;
-
-  // Оновлюємо learned rate тільки при стабільному дрейфі
-  if (_W.length >= 4 && _wVariance() < 0.0002) _lr = _lrSet(_wMedian());
-
+  const rawError = tgt - act;
+  _mwPush(rawError);
+  _dbLastE = rawError;
   _dbRefresh();
 
-  // Seek тільки при дуже великому рассинхроні
-  if (abErr > 0.080) {
-    _smoothE = 0;  // скидаємо EMA — нова точка відліку
-    _resetRate();
+  // Якщо розкид вимірів великий — мережевий jitter, не довіряємо
+  if (_mwSpread() > 0.060) return;
+
+  // Використовуємо медіану для стійкості до викидів
+  const error = _mwMedian();
+
+  // Seek тільки при дуже великому рассинхроні (> 120 мс)
+  if (Math.abs(error) > PLL_SEEK) {
+    _pllReset(true);  // зберігаємо integral — drift нікуди не дівся
     await scheduleAudio();
-    schedulePostStartCorrections();  // ← КРИТИЧНО: відновлюємо таймери
+    schedulePostStartCorrections();
     return;
   }
 
-  // Плавна корекція rate (без seek)
-  _calcAndSetRate(err, intervalSec || 4);
+  // PLL крок: плавна корекція rate
+  _pllStep(error, dtSec);
+  _dbRefresh();
 }
 
 // =============================================================================
-// Адаптивний планувальник
+// Адаптивний планувальник з геометричним зростанням
 // =============================================================================
 //
-// Геометрична прогресія × 2 при стабільному синці:
-//   Фаза входу (|err| > 10 мс):  1 с між перевірками
-//   Стабілізація (|err| ≤ 10 мс): 2→4→8→16→32→60 с
+// Фаза входу (|err| > 8 мс): 1 с між перевірками
+// Стабілізація: 2→4→8→16→32→60 с (геометрична прогресія ×2)
 //
-// Ключова відмінність від попереднього: передаємо intervalSec в
-// checkAndCorrect щоб rate розраховувався на правильний горизонт часу.
-//
-// HTTP за 4-хв пісню: ~10–20 (залежно від якості мережі)
+// HTTP за 4-хв пісню: ~12–20
 
 let correctionTimers = [];
-let _syncTid         = null;
-let _syncMs          = 1000;
-let _stableN         = 0;    // к-сть поспіль "гарних" тіків
-let _entryPhase      = true; // true = вхід у синк (часто), false = стабільно
+let _sTid = null, _sMs = 1000, _sStable = 0, _sEntry = true;
 
 function schedulePostStartCorrections() {
   correctionTimers.forEach(t => clearTimeout(t));
   correctionTimers = [];
-  _stableN    = 0;
-  _entryPhase = true;
-  _syncMs     = 1000;
-  // Перша перевірка через 2.5 с
-  correctionTimers.push(setTimeout(() => checkAndCorrect(1), 2500));
+  _dbPrevTs = null;
+  _sStable  = 0;
+  _sEntry   = true;
+  _sMs      = 1000;
+  correctionTimers.push(setTimeout(() => checkAndCorrect(), 2500));
   startPeriodicSync();
 }
 
 function startPeriodicSync() {
   stopPeriodicSync();
+  function sched(ms) { _sTid = setTimeout(() => tick().catch(console.error), ms); }
 
   async function tick() {
-    if (!playing || paused) { _next(6000); return; }
+    if (!playing || paused) { sched(6000); return; }
+    await checkAndCorrect();
 
-    const intervalSec = _syncMs / 1000;
-    await checkAndCorrect(intervalSec);
+    const good = _dbLastE !== null && Math.abs(_dbLastE) <= PLL_DEAD;
 
-    const abE = _dbLastE !== null ? Math.abs(_dbLastE) : 0.1;
-    const good = abE <= 0.010;  // ±10 мс = "добре"
-
-    if (_entryPhase) {
-      if (good) { _stableN++; }
-      else      { _stableN = 0; _syncMs = 1000; }
-      // Виходимо з фази входу після 3 гарних тіків поспіль
-      if (_stableN >= 3) { _entryPhase = false; _syncMs = 2000; }
+    if (_sEntry) {
+      if (good) _sStable++; else { _sStable = 0; _sMs = 1000; }
+      if (_sStable >= 3) { _sEntry = false; _sMs = 2000; }
     } else {
       if (good) {
-        // Геометрична прогресія × 2, максимум 60 с
-        _syncMs = Math.min(_syncMs * 2, 60000);
-      } else if (abE > 0.080) {
-        // Seek вже виконано → скидаємось до фази входу
-        _entryPhase = true; _stableN = 0; _syncMs = 1000;
+        _sMs = Math.min(_sMs * 2, 60000);
+      } else if (Math.abs(_dbLastE||0) > PLL_SEEK) {
+        _sEntry = true; _sStable = 0; _sMs = 1000;
       } else {
-        // Середній error → повертаємось до 2 с (не до 1 с — без паніки)
-        _syncMs = 2000;
+        _sMs = 2000;
       }
     }
 
-    _dbDt = _syncMs >= 1000 ? (_syncMs/1000).toFixed(0)+'s' : _syncMs+'ms';
+    _dbDt = _sMs >= 1000 ? (_sMs/1000).toFixed(0)+'s' : _sMs+'ms';
     _dbRefresh();
-    _next(_syncMs);
+    sched(_sMs);
   }
-
-  function _next(ms) { _syncTid = setTimeout(() => tick().catch(console.error), ms); }
-  _next(_syncMs);
+  sched(_sMs);
 }
 
-function stopPeriodicSync() {
-  if (_syncTid) { clearTimeout(_syncTid); _syncTid = null; }
-}
+function stopPeriodicSync()  { if (_sTid) { clearTimeout(_sTid); _sTid = null; } }
 
 function cancelCorrections() {
   correctionTimers.forEach(t => clearTimeout(t));
   correctionTimers = [];
   stopPeriodicSync();
-  _resetRate();
+  _pllReset(false);
 }
 
 // =============================================================================
@@ -633,7 +604,7 @@ function getClientId() {
 // =============================================================================
 async function init() {
   _dbInit();
-  _lr = _lrGet();
+  pll.integral = _pllLoad(); // відновлюємо drift-пам'ять пристрою
   const p = new URLSearchParams(location.search).get('p');
   if (p) history.replaceState(null, '', p);
   await loadSongList();
@@ -790,7 +761,7 @@ async function handleMsg(msg) {
         await loadLyrics(incomingSong);
       }
 
-      _W.length = 0; _smoothE = 0; _lr = _lrGet(); _dbReqs = 0;
+      _mw.length = 0; pll.integral = _pllLoad(); _dbReqs = 0; _dbPrevTs = null;
       await doPlay(incomingSong);
       break;
     }
