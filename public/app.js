@@ -131,8 +131,6 @@ async function scheduleAudio() {
   gainNode.gain.value = isMuted ? 0 : 1;
   src.connect(gainNode);
   src.start(when, off);
-  // Якір для linearRamp — без setValueAtTime Safari ігнорує рампу
-  src.playbackRate.setValueAtTime(1.0, audioCtx.currentTime);
   sourceNode = src;
   src.onended = () => {
     if (sourceNode === src) { sourceNode = null; if (role === 'host' && playing) songEnded(); }
@@ -145,7 +143,6 @@ function stopNode() {
     try { sourceNode.disconnect(); } catch {}
     sourceNode = null;
   }
-  _pidRate = 1.0;
 }
 
 function songEnded() {
@@ -169,239 +166,111 @@ function addSample(srvTime, t0) {
   const sorted  = [...clockSamples].sort((a, b) => a.rtt - b.rtt);
   const use     = sorted.slice(0, Math.max(1, Math.floor(sorted.length * 0.7)));
   const minRtt  = use[0].rtt;
-  let wsum = 0, osum = 0;
-  for (const s of use) { const w = minRtt / s.rtt; wsum += w; osum += s.off * w; }
-  offset = osum / wsum;
+  let ws = 0, os = 0;
+  for (const s of use) { const w = minRtt / s.rtt; ws += w; os += s.off * w; }
+  offset = os / ws;
 }
 
 // Початкова синхронізація при вході
 async function syncOnEntry(id) {
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 8; i++) {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${id}/time`).catch(() => null);
-    _dbN++;
     if (res?.ok) addSample((await res.json()).serverTime, t0);
-    if (i < 3) await new Promise(r => setTimeout(r, 50));
+    if (i < 7) await new Promise(r => setTimeout(r, 20));
   }
 }
 
 // Послідовні заміри — повертає найкращий offset
 // Використовуємо паралельні + послідовні для швидкості та точності
-async function resync(count = 3) {
+async function resync(count = 5) {
   for (let i = 0; i < count; i++) {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
-    _dbN++;
     if (res?.ok) addSample((await res.json()).serverTime, t0);
-    if (i < count - 1) await new Promise(r => setTimeout(r, 40));
+    if (i < count - 1) await new Promise(r => setTimeout(r, 30));
   }
 }
 
-// =============================================================================
-// Позиція аудіо — audioCtx.currentTime стабільніший за Date.now()
-// =============================================================================
+// Поточна позиція відтворення в секундах
 function getActualPos() {
   if (!sourceNode || !audioCtx) return null;
   return sourceNode._off + (audioCtx.currentTime - sourceNode._when);
 }
 
-// =============================================================================
-// PID-регулятор playbackRate
-// =============================================================================
-// P — реагує на поточний error
-// I — компенсує постійний drift пристрою (накопичується між сесіями)
-// D — гасить коливання (запобігає перельоту)
-//
-// Збереження integral в localStorage: наступна сесія вже знає drift пристрою
-// і одразу стартує з правильним rate — без зайвих корекцій.
-
-const _pid = {
-  Kp: 0.025, Ki: 0.004, Kd: 0.008,
-  integral: 0, prevErr: null, prevTs: null,
-  IMAX: 0.012,  // anti-windup ±1.2%
-  DEAD: 0.007,  // мертва зона ±7 мс — не чіпаємо rate
-  SEEK: 0.150,  // seek тільки при > 150 мс
-};
-let _pidRate = 1.0;
-
-// Відновлюємо integral з localStorage (пам'ять drift між сесіями)
-try {
-  const v = parseFloat(localStorage.getItem('k_pid6') || '0');
-  if (isFinite(v) && Math.abs(v) <= _pid.IMAX) _pid.integral = v;
-} catch {}
-
-// Застосовує rate через linearRamp — плавно, без клацань
-// КРИТИЧНО: setValueAtTime перед linearRamp, інакше Safari ігнорує рампу
-function _pidApply(rate) {
-  const r = Math.max(0.984, Math.min(1.016, rate));
-  if (Math.abs(r - _pidRate) < 0.000040) return;
-  _pidRate = r;
-  if (sourceNode?.playbackRate && audioCtx) {
-    const t = audioCtx.currentTime;
-    sourceNode.playbackRate.setValueAtTime(_pidRate, t);
-    sourceNode.playbackRate.linearRampToValueAtTime(_pidRate, t + 1.0);
-  }
-  _dbUp();
-}
-
-function _pidStep(err, dt) {
-  if (Math.abs(err) < _pid.DEAD) {
-    _pid.integral *= 0.993;
-    _pidApply(1.0 + _pid.integral);
-    _pid.prevErr = err;
-    return;
-  }
-  // Integral з anti-windup
-  _pid.integral = Math.max(-_pid.IMAX, Math.min(_pid.IMAX,
-    _pid.integral + err * Math.min(dt, 6) * _pid.Ki));
-  // Derivative (гасить коливання)
-  const deriv = (_pid.prevErr !== null && dt > 0)
-    ? (err - _pid.prevErr) / dt : 0;
-  _pid.prevErr = err;
-  _pidApply(1.0 + _pid.Kp * err + _pid.integral + _pid.Kd * deriv);
-  try { localStorage.setItem('k_pid6', _pid.integral.toFixed(8)); } catch {}
-}
-
-function _pidReset() {
-  _pidRate = 1.0; _pid.prevErr = null; _pid.prevTs = null;
-  if (sourceNode?.playbackRate && audioCtx) {
-    sourceNode.playbackRate.cancelScheduledValues(audioCtx.currentTime);
-    sourceNode.playbackRate.setValueAtTime(1.0, audioCtx.currentTime);
-  }
-  _dbUp();
-}
-
-// Медіанний фільтр — відкидає мережевий jitter
-// [+5,+6,+80,+5,+6] ms → медіана = +6 (не +20 як середнє)
-const _mw = [];
-function _mwPush(e) { _mw.push(e); if (_mw.length > 5) _mw.shift(); }
-function _mwMed()   { return _mw.length ? [..._mw].sort((a,b)=>a-b)[_mw.length>>1] : 0; }
-function _mwSprd()  {
-  if (_mw.length < 3) return 999;
-  const s = [..._mw].sort((a,b)=>a-b); return s[s.length-1]-s[0];
-}
-
-// Debug-панель
-let _dbEl=null, _dbN=0, _dbE=null, _dbDt='—';
-function _dbInit() {
-  _dbEl = document.createElement('div');
-  _dbEl.style.cssText = [
-    'position:fixed','bottom:4px','left:0','right:0','text-align:center',
-    'font-size:10px','color:#888','pointer-events:none','z-index:9999',
-    'font-family:monospace','letter-spacing:0.02em',
-  ].join(';');
-  document.body.appendChild(_dbEl); _dbUp();
-}
-function _dbUp() {
-  if (!_dbEl) return;
-  const e=_dbE, ok=e!==null&&Math.abs(e)<_pid.DEAD?' ✓':'';
-  const es=e!==null?(e>=0?'+':'')+(e*1000).toFixed(1)+' ms':'—';
-  _dbEl.textContent =
-    'err:'+es+ok+
-    '  I:'+(_pid.integral*1000).toFixed(3)+'ms'+
-    '  rate:'+_pidRate.toFixed(6)+
-    '  clk:'+(offset>=0?'+':'')+offset.toFixed(0)+'ms'+
-    '  Δt:'+_dbDt+'  HTTP:'+_dbN;
-}
-
-// =============================================================================
-// checkAndCorrect — 1 HTTP запит на тік (було 4)
-// =============================================================================
-// БАГ 3 ВИПРАВЛЕНО: після seek завжди schedulePostStartCorrections()
-// БАГ 4 ВИПРАВЛЕНО: 1 HTTP замість 4 (прибрали зайвий resync перед check)
-// БАГ 5 ВИПРАВЛЕНО: PID-регулятор playbackRate замість тільки seek
+// Перевірка дрейфу і корекція якщо потрібно (ціль: < 20ms)
 async function checkAndCorrect() {
   if (!playing || paused || startTime === null) return;
-  const now = Date.now();
-  const dt  = _pid.prevTs !== null ? (now - _pid.prevTs) / 1000 : 4;
-  _pid.prevTs = now;
-
-  const t0  = now;
+  const t0  = Date.now();
   const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
-  _dbN++;
   if (!res?.ok) return;
   addSample((await res.json()).serverTime, t0);
-
-  const tgt = (serverNow() - startTime) / 1000;
-  const act = getActualPos();
-  if (act === null) { await scheduleAudio(); schedulePostStartCorrections(); return; }
-
-  const raw = tgt - act;
-  _mwPush(raw); _dbE = raw; _dbUp();
-
-  // Jitter guard: якщо розкид > 60 мс — мережа нестабільна, пропускаємо
-  if (_mwSprd() > 0.060 && _mw.length >= 3) return;
-
-  const err = _mwMed();
-  _dbE = err; _dbUp();
-
-  // Seek тільки при великому рассинхроні
-  if (Math.abs(err) > _pid.SEEK) {
-    _pid.integral *= 0.5;
-    _pidReset();
-    await scheduleAudio();
-    schedulePostStartCorrections(); // ← БАГ 3 FIX: відновлюємо таймери!
-    return;
+  const expected = (serverNow() - startTime) / 1000;
+  const actual   = getActualPos();
+  if (actual === null) { scheduleAudio(); return; }
+  const drift = Math.abs(actual - expected);
+  if (drift > 0.020) { // > 20ms — коригуємо (було 30ms)
+    scheduleAudio();
   }
-
-  // Плавна корекція через PID (без seek)
-  _pidStep(err, dt);
 }
 
-// =============================================================================
-// Адаптивний планувальник: 1→2→4→8→16→32→60 с (геометрично)
-// =============================================================================
+// Планує серію корекцій після старту + постійний інтервал кожні 20с
 let correctionTimers = [];
-let _sTid=null, _sMs=1000, _sOk=0, _sEntry=true;
+let periodicSyncInterval = null;
 
 function schedulePostStartCorrections() {
-  correctionTimers.forEach(t=>clearTimeout(t)); correctionTimers=[];
-  _pid.prevTs=null; _pid.prevErr=null;
-  _sOk=0; _sEntry=true; _sMs=1000;
-  correctionTimers.push(setTimeout(()=>checkAndCorrect(), 2500));
+  correctionTimers.forEach(t => clearTimeout(t));
+  correctionTimers = [];
+  // Дві перевірки після старту: 3s і 6s (раніше — пісня ще не грає або дрейф нульовий)
+  [3000, 6000].forEach(delay => {
+    const t = setTimeout(() => checkAndCorrect(), delay);
+    correctionTimers.push(t);
+  });
+  // Потім кожні 10 секунд — щоб дрейф не накопичувався
   startPeriodicSync();
 }
 
 function startPeriodicSync() {
   stopPeriodicSync();
-  function sched(ms) { _sTid=setTimeout(()=>tick().catch(console.error), ms); }
-  async function tick() {
-    if (!playing||paused) { sched(6000); return; }
+  periodicSyncInterval = setInterval(async () => {
+    if (!playing || paused) return;
+    // 3 заміри для точного offset, потім перевірка дрейфу
+    await resync(3);
     await checkAndCorrect();
-    const good = _dbE!==null && Math.abs(_dbE)<_pid.DEAD;
-    if (_sEntry) {
-      if (good) _sOk++; else { _sOk=0; _sMs=1000; }
-      if (_sOk>=3) { _sEntry=false; _sMs=2000; }
-    } else {
-      if (good)                              _sMs=Math.min(_sMs*2, 60000);
-      else if (Math.abs(_dbE||0)>_pid.SEEK) { _sEntry=true; _sOk=0; _sMs=1000; }
-      else                                   _sMs=2000;
-    }
-    _dbDt=_sMs>=1000?(_sMs/1000).toFixed(0)+'s':_sMs+'ms'; _dbUp(); sched(_sMs);
-  }
-  sched(_sMs);
+  }, 10000);
 }
 
-function stopPeriodicSync() { if (_sTid) { clearTimeout(_sTid); _sTid=null; } }
+function stopPeriodicSync() {
+  if (periodicSyncInterval) {
+    clearInterval(periodicSyncInterval);
+    periodicSyncInterval = null;
+  }
+}
 
 function cancelCorrections() {
-  correctionTimers.forEach(t=>clearTimeout(t)); correctionTimers=[];
-  stopPeriodicSync(); _pidReset();
+  correctionTimers.forEach(t => clearTimeout(t));
+  correctionTimers = [];
+  stopPeriodicSync();
 }
 
 // =============================================================================
 // Wake Lock
 // =============================================================================
 async function requestWakeLock() {
-  if ('wakeLock' in navigator) {
-    try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
-  }
+  if (!('wakeLock' in navigator)) return;
+  // Не запитуємо повторно якщо вже активний
+  if (wakeLock && !wakeLock.released) return;
+  try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
 }
 function releaseWakeLock() {
+  // Хост тримає wake lock постійно — не відпускаємо під час сесії
   if (role === 'host') return;
   if (wakeLock) { wakeLock.release(); wakeLock = null; }
 }
 document.addEventListener('visibilitychange', () => {
+  // Браузер скасовує wake lock при переході вкладки у фон —
+  // відновлюємо як тільки вкладка знову стає активною.
+  // Для хоста — завжди; для клієнта — тільки під час відтворення.
   if (document.visibilityState !== 'visible') return;
   if (role === 'host' || (playing && !paused)) requestWakeLock();
 });
@@ -505,7 +374,7 @@ if (headerToggle) {
     updateSpeakerUI();
     // Якщо вмикаємо звук під час відтворення — синхронізуємось
     if (!isMuted && syncAudioEnabled && audioUnlocked && playing && !paused && startTime !== null) {
-      resync(2).then(() => { scheduleAudio(); schedulePostStartCorrections(); });
+      resync(4).then(() => { scheduleAudio(); schedulePostStartCorrections(); });
     } else if (isMuted) {
       stopNode();
     }
@@ -525,7 +394,6 @@ function getClientId() {
 // Boot
 // =============================================================================
 async function init() {
-  _dbInit();
   const p = new URLSearchParams(location.search).get('p');
   if (p) history.replaceState(null, '', p);
   await loadSongList();
@@ -648,7 +516,7 @@ async function handleMsg(msg) {
         syncAudioEnabled = saved;
         if (saved) ws.send(JSON.stringify({ type: 'sync_audio', enabled: true }));
         setStatus('Виберіть пісню зі списку нижче.');
-        requestWakeLock();
+        requestWakeLock(); // хост: тримаємо екран активним увесь час сесії
 
       } else {
         // Клієнт
@@ -682,7 +550,6 @@ async function handleMsg(msg) {
         await loadLyrics(incomingSong);
       }
 
-      _mw.length=0; _pid.prevErr=null; _pid.prevTs=null; _dbN=0;
       await doPlay(incomingSong);
       break;
     }
@@ -708,7 +575,8 @@ async function handleMsg(msg) {
       setStatus('');
       if (role === 'host') { pauseBtn.textContent = '⏸ Пауза'; }
       if (role === 'host' || (syncAudioEnabled && audioUnlocked && audioBuffer && !isMuted)) {
-        await resync(3);
+        // FIX: 5 замірів (було 3) — пауза могла "розбити" offset
+        await resync(5);
         scheduleAudio();
         schedulePostStartCorrections();
       }
@@ -759,7 +627,7 @@ async function handleMsg(msg) {
               // Паралельно: завантажуємо буфер + перші заміри
               await Promise.all([
                 ensureBuffer(currentSong),
-                resync(3),
+                resync(4),
               ]);
               setStatus('');
             } catch (e) {
@@ -767,6 +635,8 @@ async function handleMsg(msg) {
             }
           }
           if (playing && !paused && startTime !== null) {
+            // Після завантаження — ще заміри для точного старту "на льоту"
+            await resync(4);
             scheduleAudio();
             schedulePostStartCorrections();
           }
@@ -818,9 +688,8 @@ async function doPlay(song) {
   resetScroll(); setStatus(''); startAnim(); startScroll();
 
   if (role === 'host') {
-    // Хост: offset вже свіжий з playBtn handler — НЕ робимо resync тут.
-    // resync(5) в doPlay давав ~200ms затримки після startTime, що
-    // зсувало хоста відносно клієнтів.
+    // Хост: resync перед стартом — є 3 секунди запасу
+    await resync(5);
     scheduleAudio();
     schedulePostStartCorrections();
 
@@ -832,7 +701,7 @@ async function doPlay(song) {
       try {
         await Promise.all([
           ensureBuffer(song),
-          resync(3),
+          resync(4),
         ]);
         setStatus('');
       } catch (e) {
@@ -841,6 +710,8 @@ async function doPlay(song) {
         return;
       }
     }
+    // Після завантаження — ще 4 заміри вже з точним offset
+    await resync(4);
     scheduleAudio();
     schedulePostStartCorrections();
   }
@@ -872,9 +743,6 @@ playBtn?.addEventListener('click', async () => {
     }
     playBtn.disabled = false;
   }
-  // Оновлюємо offset безпосередньо перед відправкою play
-  // Це дає хосту свіжий offset без затримки в doPlay
-  await resync(3);
   ws.send(JSON.stringify({ type: 'play', song }));
 });
 
