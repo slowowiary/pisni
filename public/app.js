@@ -132,7 +132,7 @@ async function scheduleAudio() {
   src.connect(gainNode);
   src.start(when, off);
   sourceNode = src;
-  _rate = 1.0;  // скидаємо після кожного (пере)запуску
+  _rate = 1.0; _smoothE = 0; // скидаємо після кожного (пере)запуску
   src.onended = () => {
     if (sourceNode === src) { sourceNode = null; if (role === 'host' && playing) songEnded(); }
   };
@@ -178,7 +178,7 @@ async function syncOnEntry(id) {
   for (let i = 0; i < 4; i++) {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${id}/time`).catch(() => null);
-    _httpN++;
+    _dbReqs++;
     if (res?.ok) addSample((await res.json()).serverTime, t0);
     if (i < 3) await new Promise(r => setTimeout(r, 40));
   }
@@ -190,242 +190,259 @@ async function resync(count = 3) {
   for (let i = 0; i < count; i++) {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
-    _httpN++;
+    _dbReqs++;
     if (res?.ok) addSample((await res.json()).serverTime, t0);
     if (i < count - 1) await new Promise(r => setTimeout(r, 35));
   }
 }
 
 // =============================================================================
-// Поточна позиція (audioCtx.currentTime — стабільний, без jitter)
+// Поточна позиція аудіо
 // =============================================================================
+// audioCtx.currentTime — монотонний лічильник без jitter Event Loop.
 function getActualPos() {
   if (!sourceNode || !audioCtx) return null;
   return sourceNode._off + (audioCtx.currentTime - sourceNode._when);
 }
 
 // =============================================================================
-// Learned Rate — "пам'ять пристрою" в localStorage
+// Learned Rate — пам'ять пристрою між сесіями (localStorage)
 // =============================================================================
-// Кожен пристрій має мікроскопічний drift oscillator-а.
-// Ми вимірюємо середній error і зберігаємо "ідеальну" швидкість.
-// Наступна сесія одразу стартує з правильним rate — без зайвих корекцій.
-// Зберігається між перезавантаженнями сторінки.
+// Кожен телефон має мікроскопічний drift oscillator-а (±50–200 ppm).
+// Ми накопичуємо виміряний середній error і зберігаємо "базову" швидкість.
+// При наступному запуску пристрій одразу стартує з правильним rate.
+//
+// Алгоритм: EMA з alpha=0.08 (дуже повільне навчання — не реагує на jitter).
+// Оновлюється тільки коли variance останніх вимірів мала (стабільний drift).
 
-const _LS_KEY = 'karaoke_lr';   // learned rate
-const _LS_ERR = 'karaoke_le';   // last stable error для debug
+const _LR_KEY = 'k_lr2';  // localStorage key
 
-function _lrRead() {
+function _lrGet() {
   try {
-    const v = parseFloat(localStorage.getItem(_LS_KEY) || '1');
-    return (isFinite(v) && v >= 0.990 && v <= 1.010) ? v : 1.0;
+    const v = parseFloat(localStorage.getItem(_LR_KEY) || '1');
+    return (isFinite(v) && v >= 0.9950 && v <= 1.0050) ? v : 1.0;
   } catch { return 1.0; }
 }
 
-// EMA-оновлення: alpha=0.10 — повільне, стабільне навчання
-// Оновлюємо тільки якщо error стабільний (variance мала) — не навчаємось на jitter
-function _lrWrite(observedError) {
-  const cur  = _lrRead();
-  // error у секундах → корекція rate (ділимо на 60: 1 мс/хв = 0.0000167)
-  const upd  = cur + (observedError / 60.0) * 0.10;
-  const safe = Math.max(0.990, Math.min(1.010, upd));
-  try {
-    localStorage.setItem(_LS_KEY, safe.toFixed(7));
-    localStorage.setItem(_LS_ERR, (observedError * 1000).toFixed(2));
-  } catch {}
-  return safe;
+function _lrSet(errorSec) {
+  // Перетворюємо error у поправку rate.
+  // Ділимо на велике число (120) — дуже повільна адаптація.
+  // Це захищає від перенавчання при тимчасових збоях мережі.
+  const cur = _lrGet();
+  const upd = cur + (errorSec / 120.0) * 0.08;
+  const v   = Math.max(0.9950, Math.min(1.0050, upd));
+  try { localStorage.setItem(_LR_KEY, v.toFixed(8)); } catch {}
+  return v;
 }
 
 // =============================================================================
-// Кільцевий буфер останніх вимірів drift
+// Статистика drift (ковзне вікно 6 вимірів)
 // =============================================================================
-// Зберігає 8 значень error. Дає:
-//   trend    — куди дрейфує пристрій (середнє)
-//   variance — jitter чи реальний drift
+// Зберігаємо останні 6 вимірів error (секунди).
+// median()  — стійкий до викидів (jitter не псує картину)
+// variance() — дисперсія: мала = стабільний drift, велика = jitter
 
-const _DB = [];  // drift buffer: останні 8 error (секунди)
+const _W = [];  // вікно вимірів
 
-function _dbPush(e)  { _DB.push(e); if (_DB.length > 8) _DB.shift(); }
-function _dbTrend()  { if (_DB.length < 2) return null; return _DB.reduce((a,b)=>a+b,0)/_DB.length; }
-function _dbVar()    {
-  if (_DB.length < 2) return 999;
-  const m = _dbTrend();
-  return _DB.reduce((a,b)=>a+(b-m)**2,0)/_DB.length;
+function _wPush(e)    { _W.push(e); if (_W.length > 6) _W.shift(); }
+function _wMedian()   {
+  if (!_W.length) return 0;
+  const s = [..._W].sort((a,b) => a-b);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m-1]+s[m])/2;
+}
+function _wVariance() {
+  if (_W.length < 2) return 999;
+  const mn = _W.reduce((a,b)=>a+b,0)/_W.length;
+  return _W.reduce((a,b)=>a+(b-mn)**2,0)/_W.length;
 }
 
 // =============================================================================
-// Адаптивний playbackRate
+// Плавна корекція playbackRate (без перерегулювання)
 // =============================================================================
-// Формула: target = blend(errorRate, learnedRate)
-//   errorRate  = 1 + clamp(effectiveError / 6.0, -0.02, +0.02)
-//   learnedRate = з localStorage
-//   effectiveError = 0.65*current + 0.35*trend (якщо trend стабільний)
 //
-// Зміна через linearRampToValueAtTime — плавно, без клацань.
+// ГОЛОВНА ПРИЧИНА "скачків" у попередній версії:
+//   Система бачила error +15 мс → встановлювала rate 1.005 → за 3 с
+//   надолужувала +15 мс, але за цей час приходив новий вимір і
+//   знову ставила rate — перелітала в -8 мс. Цикл повторювався.
+//
+// РІШЕННЯ — двокрокова корекція:
+//
+//   Крок 1: розраховуємо СКІЛЬКИ треба скоригувати (не rate, а delta позиції)
+//     correctionSec = smoothedError (EMA від кількох вимірів)
+//
+//   Крок 2: ділимо корекцію на ВІКНО КОРЕКЦІЇ (часовий горизонт)
+//     rate = 1 + correctionSec / windowSec
+//     window = 8 с (дуже повільно, але без перельоту)
+//
+//   Крок 3: rate НЕ міняємо до наступного виміру.
+//     Він діє весь інтервал між перевірками (Δt).
+//     Коли Δt велике (30–60 с) — вікно корекції збільшується автоматично.
+//
+//   Результат: система "знає" що за windowSec вона виправить помилку
+//   рівно на correctionSec — без перельоту.
+//
+// МЕРТВА ЗОНА: ±10 мс рахується "добре" — rate не змінюємо взагалі.
+// LEARNED RATE: базова швидкість = learnedRate пристрою.
+//   target = learnedRate + correctionSec / window
 
-let _rate     = 1.0;        // поточна встановлена швидкість
-let _lr       = 1.0;        // learned rate (завантажується при старті)
-let _rTimer   = null;       // таймер рампи
+let _lr      = 1.0;   // learned rate, завантажується при старті
+let _rate    = 1.0;   // поточний встановлений rate
+let _smoothE = 0;     // EMA від error (для плавності)
+let _rTimer  = null;  // таймер рампи
 
-function _applyRate(target) {
-  const c = Math.max(0.980, Math.min(1.020, target));
-  const d = c - _rate;
-  if (Math.abs(d) < 0.0004) return;      // мертва зона — ігноруємо мікрозміни
-  _rate += d * 0.18;                     // LERP: плавне наближення
-  if (sourceNode?.playbackRate && audioCtx)
-    sourceNode.playbackRate.linearRampToValueAtTime(_rate, audioCtx.currentTime + 0.4);
-  _panelUpdate();
-}
-
-function _rampRate(target) {
-  if (_rTimer) { clearInterval(_rTimer); _rTimer = null; }
-  let n = 0;
-  _rTimer = setInterval(() => {
-    if (!sourceNode || !playing || paused) { clearInterval(_rTimer); _rTimer = null; return; }
-    _applyRate(target);
-    if (++n > 40 || Math.abs(_rate - target) < 0.0004) { clearInterval(_rTimer); _rTimer = null; }
-  }, 80);
+// Встановлює rate через linearRamp (плавно, без артефактів)
+function _setRate(r) {
+  const safe = Math.max(0.980, Math.min(1.020, r));
+  if (Math.abs(safe - _rate) < 0.00005) return;  // мікрозміна — ігноруємо
+  _rate = safe;
+  if (sourceNode?.playbackRate && audioCtx) {
+    // Рампа на 1 с — повільна, непомітна зміна швидкості
+    sourceNode.playbackRate.linearRampToValueAtTime(_rate, audioCtx.currentTime + 1.0);
+  }
+  _dbRefresh();
 }
 
 function _resetRate() {
-  _rate = 1.0;
+  _rate    = 1.0;
+  _smoothE = 0;
   if (_rTimer) { clearInterval(_rTimer); _rTimer = null; }
   if (sourceNode?.playbackRate && audioCtx) {
     sourceNode.playbackRate.cancelScheduledValues(audioCtx.currentTime);
     sourceNode.playbackRate.setValueAtTime(1.0, audioCtx.currentTime);
   }
-  _panelUpdate();
+  _dbRefresh();
 }
 
-function _targetRate(error) {
-  const trend = _dbTrend();
-  // Зважуємо поточний error і тренд (тільки якщо trend стабільний)
-  const eff = (trend !== null && _dbVar() < 0.0003)
-    ? error * 0.65 + trend * 0.35
-    : error;
-  const errRate = 1 + Math.max(-0.020, Math.min(0.020, eff / 6.0));
-  // Зважений баланс errorRate і learnedRate
-  return Math.max(0.980, Math.min(1.020, errRate * 0.6 + _lr * 0.4));
+// Обчислює і встановлює правильний rate на основі error і Δt
+// intervalSec — час до наступної перевірки (секунди)
+function _calcAndSetRate(errorSec, intervalSec) {
+  // EMA від error: alpha=0.4 — достатньо швидка реакція, але без шуму
+  _smoothE = _smoothE * 0.6 + errorSec * 0.4;
+
+  // Мертва зона ±10 мс: вважаємо "ідеально" — тільки learned rate
+  if (Math.abs(_smoothE) < 0.010) {
+    _setRate(_lr);
+    return;
+  }
+
+  // Вікно корекції = MAX(intervalSec * 2, 8 с)
+  // Якщо Δt велике (30 с) — вікно 60 с → дуже плавна корекція
+  // Якщо Δt мале (1 с) — вікно 8 с → трохи швидша, але все одно плавна
+  const window = Math.max(intervalSec * 2, 8);
+
+  // target = learnedRate + поправка
+  // Поправка = smoothedError / window (наскільки відхилитись від норми)
+  const correction = Math.max(-0.015, Math.min(0.015, _smoothE / window));
+  _setRate(_lr + correction);
 }
 
 // =============================================================================
 // Debug-панель
 // =============================================================================
-let _panel = null, _httpN = 0, _lastErr = null, _lastDt = '—';
+let _dbEl  = null, _dbReqs = 0, _dbLastE = null, _dbDt = '—';
 
-function _panelInit() {
-  _panel = document.createElement('div');
-  _panel.style.cssText = [
+function _dbInit() {
+  _dbEl = document.createElement('div');
+  _dbEl.style.cssText = [
     'position:fixed','bottom:4px','left:0','right:0','text-align:center',
     'font-size:10px','color:#888','pointer-events:none','z-index:9999',
     'font-family:monospace','letter-spacing:0.02em',
   ].join(';');
-  document.body.appendChild(_panel);
-  _panelUpdate();
+  document.body.appendChild(_dbEl);
+  _dbRefresh();
 }
-
-function _panelUpdate() {
-  if (!_panel) return;
-  const e  = _lastErr;
+function _dbRefresh() {
+  if (!_dbEl) return;
+  const e  = _dbLastE;
   const es = e !== null ? (e>=0?'+':'')+(e*1000).toFixed(1)+' ms' : '—';
-  const tr = _dbTrend();
-  const ts = tr !== null ? (tr>=0?'+':'')+(tr*1000).toFixed(1) : '—';
-  _panel.textContent =
-    'err:'+es+'  trend:'+ts+'ms  rate:'+_rate.toFixed(5)+
-    '  lr:'+_lr.toFixed(5)+'  clk:'+(offset>=0?'+':'')+offset.toFixed(0)+'ms'+
-    '  Δt:'+_lastDt+'  HTTP:'+_httpN;
+  const ms = (e !== null && Math.abs(e) <= 0.010) ? ' ✓' : '';
+  _dbEl.textContent =
+    'err: '+es+ms+
+    '  smooth: '+(_smoothE*1000).toFixed(1)+'ms'+
+    '  rate: '+_rate.toFixed(6)+
+    '  lr: '+_lr.toFixed(6)+
+    '  clk: '+(offset>=0?'+':'')+offset.toFixed(0)+'ms'+
+    '  Δt: '+_dbDt+
+    '  HTTP: '+_dbReqs;
 }
 
 // =============================================================================
 // Головна функція корекції
 // =============================================================================
-// Стратегія по рівнях error:
 //
-//   > 30 мс  → seek одразу (ривок, непомітний на слух) + перезапуск таймерів
-//              КРИТИЧНО: без перезапуску таймерів синхронізація вмирає!
-//   8–30 мс  → _rampRate: плавний цикл наближення
-//   2–8 мс   → _applyRate: один крок корекції
-//   < 2 мс   → _applyRate(learnedRate): тримаємо базову швидкість пристрою
+// Рівні реакції:
+//   |error| > 80 мс  → seek (одноразовий ривок, потім плавна корекція)
+//   |error| ≤ 80 мс  → тільки rate (ніяких seek, плавно)
+//   |error| ≤ 10 мс  → "добре", rate = learnedRate (без корекції)
 //
-// Learned rate оновлюється кожен тік при стабільному error (variance < 0.0003).
-// Це "пам'ять" — наступна сесія стартує вже з правильним rate.
+// Learned rate оновлюється при стабільному дрейфі (variance мала).
+// Це накопичується між сесіями — телефон стає точнішим з часом.
 
-async function checkAndCorrect() {
+async function checkAndCorrect(intervalSec) {
   if (!playing || paused || startTime === null) return;
 
   const t0  = Date.now();
   const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
-  _httpN++;
+  _dbReqs++;
   if (!res?.ok) return;
   addSample((await res.json()).serverTime, t0);
 
   const tgt = (serverNow() - startTime) / 1000;
   const act = getActualPos();
-
   if (act === null) { await scheduleAudio(); schedulePostStartCorrections(); return; }
 
-  const err   = tgt - act;   // + = відстаємо, − = поспішаємо
+  const err   = tgt - act;
   const abErr = Math.abs(err);
 
-  _dbPush(err);
-  _lastErr = err;
+  _wPush(err);
+  _dbLastE = err;
 
-  // Оновлюємо learned rate тільки при стабільному дрейфі (не jitter)
-  if (_DB.length >= 4 && _dbVar() < 0.0003) _lr = _lrWrite(err);
+  // Оновлюємо learned rate тільки при стабільному дрейфі
+  if (_W.length >= 4 && _wVariance() < 0.0002) _lr = _lrSet(_wMedian());
 
-  _panelUpdate();
+  _dbRefresh();
 
-  // Seek при великому рассинхроні
-  if (abErr > 0.030) {
+  // Seek тільки при дуже великому рассинхроні
+  if (abErr > 0.080) {
+    _smoothE = 0;  // скидаємо EMA — нова точка відліку
     _resetRate();
     await scheduleAudio();
-    schedulePostStartCorrections();   // ← без цього таймери вмирають!
+    schedulePostStartCorrections();  // ← КРИТИЧНО: відновлюємо таймери
     return;
   }
 
-  // Плавна корекція швидкістю
-  const rt = _targetRate(err);
-  if      (abErr > 0.008) _rampRate(rt);
-  else if (abErr > 0.002) _applyRate(rt);
-  else                    _applyRate(_lr);   // ідеально — learned rate як база
+  // Плавна корекція rate (без seek)
+  _calcAndSetRate(err, intervalSec || 4);
 }
 
 // =============================================================================
-// Адаптивний планувальник (геометричне зростання інтервалу)
+// Адаптивний планувальник
 // =============================================================================
 //
-// ЛОГІКА ІНТЕРВАЛІВ:
+// Геометрична прогресія × 2 при стабільному синці:
+//   Фаза входу (|err| > 10 мс):  1 с між перевірками
+//   Стабілізація (|err| ≤ 10 мс): 2→4→8→16→32→60 с
 //
-//   Фаза 1 — "вхід у синк" (перші ~10 с після старту/seek):
-//     Кожен тік при error > 10 мс: залишаємось на 1 с
-//     При error < 10 мс: переходимо до фази 2
+// Ключова відмінність від попереднього: передаємо intervalSec в
+// checkAndCorrect щоб rate розраховувався на правильний горизонт часу.
 //
-//   Фаза 2 — "стабілізація" (геометричне зростання ×2):
-//     1с → 2с → 4с → 8с → 16с → 32с → 60с (макс)
-//     Якщо error > 15 мс: скидаємось до 2с
-//     Якщо error > 30 мс: seek + скид до фази 1
-//
-//   Кількість HTTP на 4-хв пісню:
-//     Ідеальна мережа:  ~12–16  (entry 4 + стабілізація ~8)
-//     Звичайна мережа:  ~20–30
-//     Погана мережа:    ~40–50 (але синк все одно тримається)
-//
-// Порівняно зі старим кодом (120+ HTTP): економія 75–90%.
+// HTTP за 4-хв пісню: ~10–20 (залежно від якості мережі)
 
-let correctionTimers   = [];
-let _syncTid           = null;  // поточний setTimeout
-let _syncMs            = 1000;  // поточний інтервал
-let _stableCount       = 0;     // скільки разів поспіль error < 10 мс
-let _inEntryPhase      = true;  // true = "вхід у синк", false = "стабілізація"
+let correctionTimers = [];
+let _syncTid         = null;
+let _syncMs          = 1000;
+let _stableN         = 0;    // к-сть поспіль "гарних" тіків
+let _entryPhase      = true; // true = вхід у синк (часто), false = стабільно
 
 function schedulePostStartCorrections() {
   correctionTimers.forEach(t => clearTimeout(t));
   correctionTimers = [];
-  _stableCount    = 0;
-  _inEntryPhase   = true;
-  _syncMs         = 1000;
-  // Перша перевірка через 2.5 с (пісня вже точно грає)
-  correctionTimers.push(setTimeout(() => checkAndCorrect(), 2500));
+  _stableN    = 0;
+  _entryPhase = true;
+  _syncMs     = 1000;
+  // Перша перевірка через 2.5 с
+  correctionTimers.push(setTimeout(() => checkAndCorrect(1), 2500));
   startPeriodicSync();
 }
 
@@ -433,48 +450,39 @@ function startPeriodicSync() {
   stopPeriodicSync();
 
   async function tick() {
-    if (!playing || paused) { _schedule(6000); return; }
-    await checkAndCorrect();
+    if (!playing || paused) { _next(6000); return; }
 
-    const abErr = _lastErr !== null ? Math.abs(_lastErr) : 0.1;
+    const intervalSec = _syncMs / 1000;
+    await checkAndCorrect(intervalSec);
 
-    if (_inEntryPhase) {
-      // Фаза входу: тримаємось на 1 с доки error < 10 мс кілька разів поспіль
-      if (abErr < 0.010) {
-        _stableCount++;
-        if (_stableCount >= 3) {
-          // Переходимо до фази стабілізації
-          _inEntryPhase = false;
-          _syncMs = 2000;  // стартуємо з 2 с
-        }
-      } else {
-        _stableCount = 0;
-        _syncMs = 1000;  // error ще великий — залишаємось на 1 с
-      }
+    const abE = _dbLastE !== null ? Math.abs(_dbLastE) : 0.1;
+    const good = abE <= 0.010;  // ±10 мс = "добре"
+
+    if (_entryPhase) {
+      if (good) { _stableN++; }
+      else      { _stableN = 0; _syncMs = 1000; }
+      // Виходимо з фази входу після 3 гарних тіків поспіль
+      if (_stableN >= 3) { _entryPhase = false; _syncMs = 2000; }
     } else {
-      // Фаза стабілізації: геометричне зростання ×2
-      if (abErr < 0.010) {
-        // Добре — подвоюємо інтервал (геометрична прогресія)
-        _syncMs = Math.min(_syncMs * 2, 60000);  // макс 60 с
-      } else if (abErr > 0.030) {
-        // Великий error: seek вже зроблений у checkAndCorrect, скидаємось до фази входу
-        _inEntryPhase = true;
-        _stableCount  = 0;
-        _syncMs       = 1000;
-      } else if (abErr > 0.010) {
-        // Середній error: скидаємось до 2 с
+      if (good) {
+        // Геометрична прогресія × 2, максимум 60 с
+        _syncMs = Math.min(_syncMs * 2, 60000);
+      } else if (abE > 0.080) {
+        // Seek вже виконано → скидаємось до фази входу
+        _entryPhase = true; _stableN = 0; _syncMs = 1000;
+      } else {
+        // Середній error → повертаємось до 2 с (не до 1 с — без паніки)
         _syncMs = 2000;
       }
-      // Якщо abErr < 0.010 — продовжуємо подвоювати
     }
 
-    _lastDt = _syncMs >= 1000 ? (_syncMs/1000).toFixed(0)+'s' : _syncMs+'ms';
-    _panelUpdate();
-    _schedule(_syncMs);
+    _dbDt = _syncMs >= 1000 ? (_syncMs/1000).toFixed(0)+'s' : _syncMs+'ms';
+    _dbRefresh();
+    _next(_syncMs);
   }
 
-  function _schedule(ms) { _syncTid = setTimeout(() => tick().catch(console.error), ms); }
-  _schedule(_syncMs);
+  function _next(ms) { _syncTid = setTimeout(() => tick().catch(console.error), ms); }
+  _next(_syncMs);
 }
 
 function stopPeriodicSync() {
@@ -497,7 +505,7 @@ async function requestWakeLock() {
   }
 }
 function releaseWakeLock() {
-  if (role === 'host') return;  // хост тримає wake lock постійно
+  if (role === 'host') return;
   if (wakeLock) { wakeLock.release(); wakeLock = null; }
 }
 document.addEventListener('visibilitychange', () => {
@@ -624,8 +632,8 @@ function getClientId() {
 // Boot
 // =============================================================================
 async function init() {
-  _panelInit();
-  _lr = _lrRead();  // завантажуємо learned rate — пристрій одразу знає свою швидкість
+  _dbInit();
+  _lr = _lrGet();
   const p = new URLSearchParams(location.search).get('p');
   if (p) history.replaceState(null, '', p);
   await loadSongList();
@@ -782,10 +790,7 @@ async function handleMsg(msg) {
         await loadLyrics(incomingSong);
       }
 
-      // Скидаємо drift history при новій пісні; перезавантажуємо learned rate
-      _DB.length = 0;
-      _lr = _lrRead();
-      _httpN = 0;
+      _W.length = 0; _smoothE = 0; _lr = _lrGet(); _dbReqs = 0;
       await doPlay(incomingSong);
       break;
     }
@@ -871,7 +876,7 @@ async function handleMsg(msg) {
             }
           }
           if (playing && !paused && startTime !== null) {
-            // Після завантаження — 2 додаткових заміри
+            // Після завантаження — ще заміри для точного старту "на льоту"
             await resync(2);
             scheduleAudio();
             schedulePostStartCorrections();
@@ -946,7 +951,7 @@ async function doPlay(song) {
         return;
       }
     }
-    // Після завантаження — 2 додаткових заміри
+    // Після завантаження — ще 4 заміри вже з точним offset
     await resync(2);
     scheduleAudio();
     schedulePostStartCorrections();
