@@ -205,7 +205,7 @@
       border-bottom: 1px solid #f0f0f0;
       text-transform: uppercase; letter-spacing: .05em;
     }
-    #song-list { list-style: none; max-height: 280px; overflow-y: auto; }
+    #song-list { list-style: none; overflow-y: auto; }
     #song-list li {
       padding: .7rem 1rem; cursor: pointer;
       border-bottom: 1px solid #f5f5f5;
@@ -234,72 +234,104 @@
 
     /* ── Кнопка пожертвування ───────────────────────────────── */
     #donate-btn {
-      background: #e91e63; color: #fff; border: none;
-      padding: .6rem 1.4rem; font-size: .9rem; font-weight: 600;
-      border-radius: 8px; cursor: pointer;
-      transition: background .15s, transform .1s;
+      display: inline-flex;
+      align-items: center;
+      gap: .5rem;
+      background: linear-gradient(135deg, #e91e63, #c2185b);
+      color: #fff;
+      border: none;
+      padding: .8rem 2rem;
+      font-size: 1rem;
+      font-weight: 700;
+      border-radius: 30px;
+      cursor: pointer;
+      margin: 1rem auto;
+      box-shadow: 0 4px 14px rgba(233,30,99,.35);
+      transition: transform .15s, box-shadow .15s;
     }
-    #donate-btn:hover { background: #c2185b; transform: translateY(-1px); }
+    #donate-btn:hover {
+      background: linear-gradient(135deg, #c2185b, #ad1457);
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(233,30,99,.45);
+    }
 
     /* ── Модальне вікно ─────────────────────────────────────── */
-    #donate-modal-overlay {
+    #donate-overlay {
       display: none;
       position: fixed; inset: 0;
       background: rgba(0,0,0,.5);
-      z-index: 1000;
+      z-index: 500;
       align-items: center;
       justify-content: center;
       padding: 1rem;
     }
-    #donate-modal-overlay.open { display: flex; }
+    #donate-overlay.open { display: flex; }
+
     #donate-modal {
       background: #fff;
-      border-radius: 14px;
-      padding: 2rem 1.8rem;
-      max-width: 440px;
+      border-radius: 16px;
+      padding: 2rem;
+      max-width: 460px;
       width: 100%;
-      box-shadow: 0 8px 32px rgba(0,0,0,.18);
+      box-shadow: 0 12px 40px rgba(0,0,0,.2);
       position: relative;
     }
-    #donate-modal h3 {
-      color: #3f51b5; font-size: 1.1rem; font-weight: 700;
-      margin-bottom: 1rem; text-align: center;
+    #donate-modal h2 {
+      font-size: 1.2rem;
+      font-weight: 800;
+      color: #3f51b5;
+      margin-bottom: 1.2rem;
+      text-align: center;
+      line-height: 1.4;
     }
-    #donate-modal .donate-church {
-      font-weight: 700; font-size: .95rem; color: #1a1a2e;
-      margin-bottom: .8rem; text-align: center;
+    .donate-row {
+      display: flex;
+      gap: .5rem;
+      align-items: flex-start;
+      padding: .55rem 0;
+      border-bottom: 1px solid #eee;
+      font-size: .9rem;
+      color: #333;
     }
-    #donate-modal table {
-      width: 100%; border-collapse: collapse;
-      font-size: .85rem; margin-bottom: 1rem;
+    .donate-row:last-of-type { border-bottom: none; }
+    .donate-label {
+      font-weight: 700;
+      color: #555;
+      min-width: 70px;
+      flex-shrink: 0;
     }
-    #donate-modal td {
-      padding: .35rem .5rem;
-      border-bottom: 1px solid #f0f0f0;
-      vertical-align: top;
-    }
-    #donate-modal td:first-child {
-      color: #888; width: 40%; white-space: nowrap;
-    }
-    #donate-modal td:last-child {
-      color: #1a1a2e; font-family: monospace; font-size: .82rem;
+    .donate-value {
       word-break: break-all;
     }
-    #donate-modal .donate-link {
-      display: block; text-align: center; margin-top: .8rem;
-      background: #e91e63; color: #fff !important;
-      padding: .75rem 1.5rem; border-radius: 8px;
-      font-weight: 600; text-decoration: none; font-size: .95rem;
+    #donate-link-btn {
+      display: block;
+      width: 100%;
+      margin-top: 1.2rem;
+      background: linear-gradient(135deg, #e91e63, #c2185b);
+      color: #fff;
+      border: none;
+      padding: .8rem;
+      font-size: 1rem;
+      font-weight: 700;
+      border-radius: 10px;
+      cursor: pointer;
+      text-align: center;
+      text-decoration: none;
       transition: background .15s;
     }
-    #donate-modal .donate-link:hover { background: #c2185b; }
-    #donate-modal-close {
-      position: absolute; top: .8rem; right: 1rem;
-      background: none; border: none; font-size: 1.4rem;
-      cursor: pointer; color: #aaa; padding: 0;
-      line-height: 1; font-weight: 400;
+    #donate-link-btn:hover { background: linear-gradient(135deg,#c2185b,#ad1457); }
+    #donate-close {
+      position: absolute;
+      top: .8rem; right: 1rem;
+      background: none;
+      border: none;
+      font-size: 1.5rem;
+      color: #aaa;
+      cursor: pointer;
+      padding: .2rem .4rem;
+      line-height: 1;
     }
-    #donate-modal-close:hover { color: #333; transform: none; background: none; }
+    #donate-close:hover { color: #333; transform: none; background: none; box-shadow: none; }
   </style>
 </head>
 <body>
@@ -323,15 +355,18 @@
 
     <!-- Екран входу для клієнта -->
     <div id="join-screen" hidden>
-      <div class="join-icon">🙏</div>
-      <h2>Христос Воскрес!</h2>
-      <p>Вас запрошують поспівати разом.<br>Прославте Бога разом з нами!</p>
-      <button id="join-btn">🎵 Зайти в кімнату</button>
+      <div class="join-icon">🎵🎵🎵</div>
+      <h2>Християнські пісні</h2>
+      <p>Заходь щоб співати!</p>
+      <button id="join-btn">Зайти</button>
     </div>
 
     <!-- Кімната -->
     <div id="room-view" hidden style="width:100%;display:flex;flex-direction:column;align-items:center;gap:1.2rem">
-
+      <label id="sync-audio-label" hidden>
+        <input type="checkbox" id="sync-audio-check">
+        📻 Грати музику на всіх пристроях
+      </label>
       <p id="room-url-label">Поділіться посиланням з друзями</p>
       <div id="room-url-row">
         <div id="room-url" title="Натисніть, щоб скопіювати"></div>
@@ -344,10 +379,7 @@
         <button id="pause-btn" hidden>⏸ Пауза</button>
       </div>
 
-      <label id="sync-audio-label" hidden>
-        <input type="checkbox" id="sync-audio-check">
-        📻 Грати музику на всіх пристроях
-      </label>
+
 
       <div id="lyrics-container" hidden>
         <div id="lyrics"></div>
@@ -361,11 +393,63 @@
     </div>
 
   </main>
-
-  <div style="text-align:center;padding:.5rem 0 1rem">
-  <button id="donate-btn" onclick="document.getElementById('donate-modal-overlay').classList.add('open')">❤️ Пожертвувати</button>
+<div style="text-align: center; padding:10px;">
+  <a href="https://pisni.slovo-wiry.workers.dev/">Створити нову кімнату</a>
 </div>
-<footer>© 2026 Slowiary Worship · Всі права захищені</footer>
+
+<!-- Кнопка пожертвування -->
+<div style="text-align:center; padding: 0 1rem 1.2rem;">
+  <button id="donate-btn">❤️ Пожертвування</button>
+</div>
+
+<!-- Модальне вікно пожертвування -->
+<div id="donate-overlay">
+  <div id="donate-modal">
+    <button id="donate-close" title="Закрити">×</button>
+    <h2>🙏 Kościół Zielonoświątkowy<br>„Słowo Wiary" w Warszawie</h2>
+    <div class="donate-row">
+      <span class="donate-label">PLN</span>
+      <span class="donate-value">PL41 1090 1753 0000 0001 4197 1368</span>
+    </div>
+    <div class="donate-row">
+      <span class="donate-label">USD</span>
+      <span class="donate-value">PL38 1090 1753 0000 0001 4358 7927</span>
+    </div>
+    <div class="donate-row">
+      <span class="donate-label">NIP</span>
+      <span class="donate-value">5242817003</span>
+    </div>
+    <div class="donate-row">
+      <span class="donate-label">REGON</span>
+      <span class="donate-value">366142357</span>
+    </div>
+    <div class="donate-row">
+      <span class="donate-label">📍</span>
+      <span class="donate-value">Wyborna 20, 03-681 Warszawa</span>
+    </div>
+    <div class="donate-row">
+      <span class="donate-label">📞</span>
+      <span class="donate-value">+48 504 739 000</span>
+    </div>
+    <a id="donate-link-btn" href="https://www.slowo-wiary.pl/ofiara" target="_blank" rel="noopener">
+      💳 Перейти до оплати
+    </a>
+  </div>
+</div>
+
+  <footer>© 2026 Slowiary Worship · Всі права захищені by <a href="https://webprogger.wordpress.com/">WebProgger</a></footer>
+
+  <script>
+    // Модальне вікно пожертвування
+    const donateBtn = document.getElementById('donate-btn');
+    const donateOverlay = document.getElementById('donate-overlay');
+    const donateClose = document.getElementById('donate-close');
+    donateBtn.addEventListener('click', () => donateOverlay.classList.add('open'));
+    donateClose.addEventListener('click', () => donateOverlay.classList.remove('open'));
+    donateOverlay.addEventListener('click', (e) => {
+      if (e.target === donateOverlay) donateOverlay.classList.remove('open');
+    });
+  </script>
 
   <script src="/app.js"></script>
   <video id="wake-video" loop muted playsinline
@@ -423,31 +507,5 @@ document.addEventListener('click', () => {
       });
     });
   </script>
-
-  <!-- Модальне вікно пожертвування -->
-  <div id="donate-modal-overlay">
-    <div id="donate-modal">
-      <button id="donate-modal-close" onclick="document.getElementById('donate-modal-overlay').classList.remove('open')">×</button>
-      <h3>❤️ Пожертвувати</h3>
-      <div class="donate-church">Kościół Zielonoświątkowy<br>"Słowo Wiary" w Warszawie</div>
-      <table>
-        <tr><td>PLN</td><td>PL41 1090 1753 0000 0001 4197 1368</td></tr>
-        <tr><td>USD</td><td>PL38 1090 1753 0000 0001 4358 7927</td></tr>
-        <tr><td>NIP</td><td>5242817003</td></tr>
-        <tr><td>Regon</td><td>366142357</td></tr>
-        <tr><td>Адреса</td><td>Wyborna 20, 03-681 Warszawa</td></tr>
-        <tr><td>Тел</td><td>+48 504 739 000</td></tr>
-      </table>
-      <a class="donate-link" href="https://form.jotform.com/231102937473352" target="_blank" rel="noopener">💳 Перейти до оплати</a>
-    </div>
-  </div>
-
-
-<script>
-  document.getElementById('donate-modal-overlay').addEventListener('click', function(e) {
-    if (e.target === this) this.classList.remove('open');
-  });
-</script>
-
 </body>
 </html>
