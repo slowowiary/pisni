@@ -131,9 +131,7 @@ async function scheduleAudio() {
   gainNode.gain.value = isMuted ? 0 : 1;
   src.connect(gainNode);
   src.start(when, off);
-  src._ctxWhen = when;  // audioCtx час запуску — для точного getActualPos
-  src._ctxOff  = off;
-  // Якір для linearRamp — без нього Safari ігнорує всі подальші рампи
+  // Якір для linearRamp — без setValueAtTime Safari ігнорує рампу
   src.playbackRate.setValueAtTime(1.0, audioCtx.currentTime);
   sourceNode = src;
   src.onended = () => {
@@ -147,6 +145,7 @@ function stopNode() {
     try { sourceNode.disconnect(); } catch {}
     sourceNode = null;
   }
+  _pidRate = 1.0;
 }
 
 function songEnded() {
@@ -180,7 +179,7 @@ async function syncOnEntry(id) {
   for (let i = 0; i < 4; i++) {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${id}/time`).catch(() => null);
-    _dbReqs++;
+    _dbN++;
     if (res?.ok) addSample((await res.json()).serverTime, t0);
     if (i < 3) await new Promise(r => setTimeout(r, 50));
   }
@@ -192,183 +191,134 @@ async function resync(count = 3) {
   for (let i = 0; i < count; i++) {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
-    _dbReqs++;
+    _dbN++;
     if (res?.ok) addSample((await res.json()).serverTime, t0);
     if (i < count - 1) await new Promise(r => setTimeout(r, 40));
   }
 }
 
-// Поточна позиція відтворення — audioCtx.currentTime точніший за Date.now()
+// =============================================================================
+// Позиція аудіо — audioCtx.currentTime стабільніший за Date.now()
+// =============================================================================
 function getActualPos() {
   if (!sourceNode || !audioCtx) return null;
-  const when = sourceNode._ctxWhen ?? sourceNode._when;
-  const off  = sourceNode._ctxOff  ?? sourceNode._off;
-  return off + (audioCtx.currentTime - when);
+  return sourceNode._off + (audioCtx.currentTime - sourceNode._when);
 }
 
 // =============================================================================
-// Система синхронізації: PID-регулятор + адаптивний інтервал
+// PID-регулятор playbackRate
 // =============================================================================
+// P — реагує на поточний error
+// I — компенсує постійний drift пристрою (накопичується між сесіями)
+// D — гасить коливання (запобігає перельоту)
 //
-// ПРОБЛЕМА старого коду:
-//   - seek при будь-якому drift > 20 мс → постійні ривки
-//   - після seek таймери НЕ перезапускались → синхронізація вмирала назавжди
-//   - resync(3) + checkAndCorrect = 4 HTTP на тік замість 1
-//   - фіксований інтервал 10 с незалежно від стану синку
-//
-// РІШЕННЯ:
-//   1. PID-регулятор playbackRate (без seek при малому drift)
-//   2. Seek тільки при > 200 мс
-//   3. 1 HTTP запит на тік
-//   4. Геометрична прогресія інтервалу: 1→2→4→8→16→32→60 с
-//   5. Збереження integral в localStorage (пам'ять drift між сесіями)
+// Збереження integral в localStorage: наступна сесія вже знає drift пристрою
+// і одразу стартує з правильним rate — без зайвих корекцій.
 
-// ── PID-стан ─────────────────────────────────────────────────────────────────
-// integral: накопичує постійний drift пристрою → компенсує його до нуля
-// derivative: реагує на швидкість зміни error → гасить коливання
-// Разом: швидкий вхід у синк + утримання без скачків
-
-const pid = {
-  // Коефіцієнти (підібрані для браузерного аудіо з HTTP jitter ±30 мс):
-  Kp: 0.020,   // пропорційний: маленький → не перелітаємо
-  Ki: 0.003,   // інтегральний: повільний → компенсує постійний drift
-  Kd: 0.010,   // диференціальний: гасить коливання ("антискачок")
-
-  integral:  0,     // ∫ error dt — пам'ять про постійний drift пристрою
-  prevError: null,  // попередній error для розрахунку похідної
-  prevTs:    null,  // мс попереднього виміру (для dt)
-
-  IMAX: 0.012,  // anti-windup: обмежуємо integral ±1.2%
-  DEAD: 0.006,  // мертва зона: ±6 мс = "ідеально", не чіпаємо rate
-  SEEK: 0.200,  // seek тільки при > 200 мс (непомітний ривок)
+const _pid = {
+  Kp: 0.025, Ki: 0.004, Kd: 0.008,
+  integral: 0, prevErr: null, prevTs: null,
+  IMAX: 0.012,  // anti-windup ±1.2%
+  DEAD: 0.007,  // мертва зона ±7 мс — не чіпаємо rate
+  SEEK: 0.150,  // seek тільки при > 150 мс
 };
-
-// Зберігаємо integral між сесіями — наступний запуск вже знає drift пристрою
-const PID_KEY = 'k_pid5';
-(function() {
-  try {
-    const v = parseFloat(localStorage.getItem(PID_KEY) || '0');
-    if (isFinite(v) && Math.abs(v) <= pid.IMAX) pid.integral = v;
-  } catch {}
-})();
-
-// Застосовує новий rate через linearRamp — плавно, без клацань
-// Критично: setValueAtTime ПЕРЕД linearRamp (інакше Safari ігнорує рамп)
 let _pidRate = 1.0;
+
+// Відновлюємо integral з localStorage (пам'ять drift між сесіями)
+try {
+  const v = parseFloat(localStorage.getItem('k_pid6') || '0');
+  if (isFinite(v) && Math.abs(v) <= _pid.IMAX) _pid.integral = v;
+} catch {}
+
+// Застосовує rate через linearRamp — плавно, без клацань
+// КРИТИЧНО: setValueAtTime перед linearRamp, інакше Safari ігнорує рампу
 function _pidApply(rate) {
   const r = Math.max(0.984, Math.min(1.016, rate));
-  if (Math.abs(r - _pidRate) < 0.000040) return; // мікрозміна → ігноруємо
+  if (Math.abs(r - _pidRate) < 0.000040) return;
   _pidRate = r;
   if (sourceNode?.playbackRate && audioCtx) {
     const t = audioCtx.currentTime;
-    sourceNode.playbackRate.setValueAtTime(_pidRate, t);          // якір
-    sourceNode.playbackRate.linearRampToValueAtTime(_pidRate, t + 1.2); // плавна рампа 1.2 с
+    sourceNode.playbackRate.setValueAtTime(_pidRate, t);
+    sourceNode.playbackRate.linearRampToValueAtTime(_pidRate, t + 1.0);
   }
-  _dbUpdate();
+  _dbUp();
 }
 
-// Один крок PID: error (с), dt (с) → новий rate
-function _pidStep(error, dt) {
-  // Мертва зона: дуже малий error → тримаємо integral rate
-  if (Math.abs(error) < pid.DEAD) {
-    pid.integral *= 0.992;  // integral повільно "остигає"
-    pid.prevError = error;
-    _pidApply(1.0 + pid.integral);
+function _pidStep(err, dt) {
+  if (Math.abs(err) < _pid.DEAD) {
+    _pid.integral *= 0.993;
+    _pidApply(1.0 + _pid.integral);
+    _pid.prevErr = err;
     return;
   }
-
-  // Інтегральна частина (з anti-windup обмеженням)
-  const dtClamped = Math.min(dt, 8); // обмежуємо dt щоб не стрибав після паузи
-  pid.integral = Math.max(-pid.IMAX, Math.min(pid.IMAX,
-    pid.integral + error * dtClamped * pid.Ki
-  ));
-
-  // Диференціальна частина (похідна error за часом)
-  // Якщо error швидко росте → Kd гальмує; якщо зменшується → допомагає
-  const derivative = (pid.prevError !== null && dtClamped > 0)
-    ? (error - pid.prevError) / dtClamped
-    : 0;
-
-  pid.prevError = error;
-
-  // PID вихід = P + I + D
-  const output = pid.Kp * error + pid.integral + pid.Kd * derivative;
-  _pidApply(1.0 + output);
-
-  // Зберігаємо integral — це "пам'ять" про drift пристрою
-  try { localStorage.setItem(PID_KEY, pid.integral.toFixed(8)); } catch {}
+  // Integral з anti-windup
+  _pid.integral = Math.max(-_pid.IMAX, Math.min(_pid.IMAX,
+    _pid.integral + err * Math.min(dt, 6) * _pid.Ki));
+  // Derivative (гасить коливання)
+  const deriv = (_pid.prevErr !== null && dt > 0)
+    ? (err - _pid.prevErr) / dt : 0;
+  _pid.prevErr = err;
+  _pidApply(1.0 + _pid.Kp * err + _pid.integral + _pid.Kd * deriv);
+  try { localStorage.setItem('k_pid6', _pid.integral.toFixed(8)); } catch {}
 }
 
-// ── Медіанний фільтр вимірів ─────────────────────────────────────────────────
-// 5 вимірів. Медіана стійка до викидів (jitter):
-// [-3, +4, +80, +3, +4] мс → медіана = +4 мс (не +18 як середнє)
-// Spread > 60 мс → вимір ненадійний через jitter, пропускаємо
+function _pidReset() {
+  _pidRate = 1.0; _pid.prevErr = null; _pid.prevTs = null;
+  if (sourceNode?.playbackRate && audioCtx) {
+    sourceNode.playbackRate.cancelScheduledValues(audioCtx.currentTime);
+    sourceNode.playbackRate.setValueAtTime(1.0, audioCtx.currentTime);
+  }
+  _dbUp();
+}
 
+// Медіанний фільтр — відкидає мережевий jitter
+// [+5,+6,+80,+5,+6] ms → медіана = +6 (не +20 як середнє)
 const _mw = [];
-function _mwAdd(e)   { _mw.push(e); if (_mw.length > 5) _mw.shift(); }
-function _mwMed()    {
-  if (!_mw.length) return 0;
-  return [..._mw].sort((a, b) => a - b)[_mw.length >> 1];
-}
-function _mwSpread() {
+function _mwPush(e) { _mw.push(e); if (_mw.length > 5) _mw.shift(); }
+function _mwMed()   { return _mw.length ? [..._mw].sort((a,b)=>a-b)[_mw.length>>1] : 0; }
+function _mwSprd()  {
   if (_mw.length < 3) return 999;
-  const s = [..._mw].sort((a, b) => a - b);
-  return s[s.length - 1] - s[0];
+  const s = [..._mw].sort((a,b)=>a-b); return s[s.length-1]-s[0];
 }
 
-// ── Debug-панель ─────────────────────────────────────────────────────────────
-let _dbEl = null, _dbReqs = 0, _dbLastE = null, _dbDt = '—';
-
+// Debug-панель
+let _dbEl=null, _dbN=0, _dbE=null, _dbDt='—';
 function _dbInit() {
   _dbEl = document.createElement('div');
   _dbEl.style.cssText = [
-    'position:fixed', 'bottom:4px', 'left:0', 'right:0', 'text-align:center',
-    'font-size:10px', 'color:#888', 'pointer-events:none', 'z-index:9999',
-    'font-family:monospace', 'letter-spacing:0.02em',
+    'position:fixed','bottom:4px','left:0','right:0','text-align:center',
+    'font-size:10px','color:#888','pointer-events:none','z-index:9999',
+    'font-family:monospace','letter-spacing:0.02em',
   ].join(';');
-  document.body.appendChild(_dbEl);
-  _dbUpdate();
+  document.body.appendChild(_dbEl); _dbUp();
 }
-
-function _dbUpdate() {
+function _dbUp() {
   if (!_dbEl) return;
-  const e  = _dbLastE;
-  const es = e !== null ? (e >= 0 ? '+' : '') + (e * 1000).toFixed(1) + ' ms' : '—';
-  const ok = e !== null && Math.abs(e) < pid.DEAD ? ' ✓' : '';
+  const e=_dbE, ok=e!==null&&Math.abs(e)<_pid.DEAD?' ✓':'';
+  const es=e!==null?(e>=0?'+':'')+(e*1000).toFixed(1)+' ms':'—';
   _dbEl.textContent =
-    'err:' + es + ok +
-    '  P:' + (pid.Kp * (e||0) * 1000).toFixed(2) +
-    '  I:' + (pid.integral * 1000).toFixed(3) +
-    '  D:' + (pid.Kd * ((e||0) - (pid.prevError||0)) * 1000).toFixed(2) +
-    '  rate:' + _pidRate.toFixed(6) +
-    '  clk:' + (offset >= 0 ? '+' : '') + offset.toFixed(0) + 'ms' +
-    '  Δt:' + _dbDt +
-    '  HTTP:' + _dbReqs;
+    'err:'+es+ok+
+    '  I:'+(_pid.integral*1000).toFixed(3)+'ms'+
+    '  rate:'+_pidRate.toFixed(6)+
+    '  clk:'+(offset>=0?'+':'')+offset.toFixed(0)+'ms'+
+    '  Δt:'+_dbDt+'  HTTP:'+_dbN;
 }
 
-// ── Головна функція корекції ──────────────────────────────────────────────────
-//
-// Алгоритм:
-//   1. Один HTTP запит → оновлює offset годинника
-//   2. Медіанний фільтр → відкидає jitter
-//   3. Якщо spread великий → вимір ненадійний, пропускаємо
-//   4. |error| > 200 мс → seek (непомітний ривок)
-//   5. |error| ≤ 200 мс → PID крок (плавна зміна rate)
-//
-// КРИТИЧНО: після seek завжди schedulePostStartCorrections()
-// Без цього таймери вмирають і синхронізація зупиняється назавжди!
-
+// =============================================================================
+// checkAndCorrect — 1 HTTP запит на тік (було 4)
+// =============================================================================
+// БАГ 3 ВИПРАВЛЕНО: після seek завжди schedulePostStartCorrections()
+// БАГ 4 ВИПРАВЛЕНО: 1 HTTP замість 4 (прибрали зайвий resync перед check)
+// БАГ 5 ВИПРАВЛЕНО: PID-регулятор playbackRate замість тільки seek
 async function checkAndCorrect() {
   if (!playing || paused || startTime === null) return;
-
   const now = Date.now();
-  const dt  = pid.prevTs !== null ? (now - pid.prevTs) / 1000 : 4;
-  pid.prevTs = now;
+  const dt  = _pid.prevTs !== null ? (now - _pid.prevTs) / 1000 : 4;
+  _pid.prevTs = now;
 
-  // 1 HTTP запит (не 4 як раніше)
   const t0  = now;
   const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
-  _dbReqs++;
+  _dbN++;
   if (!res?.ok) return;
   addSample((await res.json()).serverTime, t0);
 
@@ -376,104 +326,67 @@ async function checkAndCorrect() {
   const act = getActualPos();
   if (act === null) { await scheduleAudio(); schedulePostStartCorrections(); return; }
 
-  const raw = tgt - act;  // + = відстаємо, − = поспішаємо
-  _mwAdd(raw);
-  _dbLastE = raw;
+  const raw = tgt - act;
+  _mwPush(raw); _dbE = raw; _dbUp();
 
-  // Якщо spread великий — мережевий jitter, вимір ненадійний
-  if (_mwSpread() > 0.060 && _mw.length >= 3) { _dbUpdate(); return; }
+  // Jitter guard: якщо розкид > 60 мс — мережа нестабільна, пропускаємо
+  if (_mwSprd() > 0.060 && _mw.length >= 3) return;
 
-  const error = _mwMed();
-  _dbLastE = error; // показуємо медіану, не сирий вимір
-  _dbUpdate();
+  const err = _mwMed();
+  _dbE = err; _dbUp();
 
   // Seek тільки при великому рассинхроні
-  if (Math.abs(error) > pid.SEEK) {
-    pid.integral  *= 0.5;  // зменшуємо, але не скидаємо — drift нікуди не дівся
-    pid.prevError  = null;
-    pid.prevTs     = null;
-    _pidRate       = 1.0;
+  if (Math.abs(err) > _pid.SEEK) {
+    _pid.integral *= 0.5;
+    _pidReset();
     await scheduleAudio();
-    schedulePostStartCorrections(); // ← КРИТИЧНО: відновлюємо таймери після seek
+    schedulePostStartCorrections(); // ← БАГ 3 FIX: відновлюємо таймери!
     return;
   }
 
-  // Плавна корекція через PID
-  _pidStep(error, dt);
+  // Плавна корекція через PID (без seek)
+  _pidStep(err, dt);
 }
 
-// ── Адаптивний планувальник ───────────────────────────────────────────────────
-//
-// Геометрична прогресія: 1с → 2с → 4с → 8с → 16с → 32с → 60с (×2)
-// 1 HTTP запит на тік. За 4-хв пісню: ~12–18 запитів (було ~120).
-//
-// Фаза входу (|err| > DEAD): 1 с між перевірками
-// Після 3 гарних тіків: переходимо до геометричної прогресії
-// При поганому error: скидаємось до 2 с (не 1 — без паніки)
-
+// =============================================================================
+// Адаптивний планувальник: 1→2→4→8→16→32→60 с (геометрично)
+// =============================================================================
 let correctionTimers = [];
-let _sTid   = null;
-let _sMs    = 1000;
-let _sGoodN = 0;
-let _sEntry = true;
+let _sTid=null, _sMs=1000, _sOk=0, _sEntry=true;
 
 function schedulePostStartCorrections() {
-  correctionTimers.forEach(t => clearTimeout(t));
-  correctionTimers = [];
-  pid.prevTs    = null;
-  pid.prevError = null;
-  _sGoodN       = 0;
-  _sEntry       = true;
-  _sMs          = 1000;
-  correctionTimers.push(setTimeout(() => checkAndCorrect(), 2500));
+  correctionTimers.forEach(t=>clearTimeout(t)); correctionTimers=[];
+  _pid.prevTs=null; _pid.prevErr=null;
+  _sOk=0; _sEntry=true; _sMs=1000;
+  correctionTimers.push(setTimeout(()=>checkAndCorrect(), 2500));
   startPeriodicSync();
 }
 
 function startPeriodicSync() {
   stopPeriodicSync();
-  function next(ms) { _sTid = setTimeout(() => tick().catch(console.error), ms); }
-
+  function sched(ms) { _sTid=setTimeout(()=>tick().catch(console.error), ms); }
   async function tick() {
-    if (!playing || paused) { next(6000); return; }
+    if (!playing||paused) { sched(6000); return; }
     await checkAndCorrect();
-
-    const good = _dbLastE !== null && Math.abs(_dbLastE) < pid.DEAD;
-
+    const good = _dbE!==null && Math.abs(_dbE)<_pid.DEAD;
     if (_sEntry) {
-      if (good) _sGoodN++; else { _sGoodN = 0; _sMs = 1000; }
-      if (_sGoodN >= 3) { _sEntry = false; _sMs = 2000; } // вийшли з фази входу
+      if (good) _sOk++; else { _sOk=0; _sMs=1000; }
+      if (_sOk>=3) { _sEntry=false; _sMs=2000; }
     } else {
-      if (good) {
-        _sMs = Math.min(_sMs * 2, 60000); // геометрично ×2 до 60 с
-      } else if (Math.abs(_dbLastE || 0) > pid.SEEK) {
-        _sEntry = true; _sGoodN = 0; _sMs = 1000; // seek → фаза входу
-      } else {
-        _sMs = 2000; // середній error → 2 с
-      }
+      if (good)                              _sMs=Math.min(_sMs*2, 60000);
+      else if (Math.abs(_dbE||0)>_pid.SEEK) { _sEntry=true; _sOk=0; _sMs=1000; }
+      else                                   _sMs=2000;
     }
-
-    _dbDt = _sMs >= 1000 ? (_sMs / 1000).toFixed(0) + 's' : _sMs + 'ms';
-    _dbUpdate();
-    next(_sMs);
+    _dbDt=_sMs>=1000?(_sMs/1000).toFixed(0)+'s':_sMs+'ms'; _dbUp(); sched(_sMs);
   }
-  next(_sMs);
+  sched(_sMs);
 }
 
-function stopPeriodicSync() {
-  if (_sTid) { clearTimeout(_sTid); _sTid = null; }
-}
+function stopPeriodicSync() { if (_sTid) { clearTimeout(_sTid); _sTid=null; } }
 
 function cancelCorrections() {
-  correctionTimers.forEach(t => clearTimeout(t));
-  correctionTimers = [];
-  stopPeriodicSync();
-  _pidRate      = 1.0;
-  pid.prevError = null;
-  pid.prevTs    = null;
-  if (sourceNode?.playbackRate && audioCtx) {
-    sourceNode.playbackRate.cancelScheduledValues(audioCtx.currentTime);
-    sourceNode.playbackRate.setValueAtTime(1.0, audioCtx.currentTime);
-  }
+  correctionTimers.forEach(t=>clearTimeout(t)); correctionTimers=[];
+  stopPeriodicSync(); _pidReset();
 }
 
 // =============================================================================
@@ -769,7 +682,7 @@ async function handleMsg(msg) {
         await loadLyrics(incomingSong);
       }
 
-      _mw.length = 0; pid.prevError = null; pid.prevTs = null; _dbReqs = 0;
+      _mw.length=0; _pid.prevErr=null; _pid.prevTs=null; _dbN=0;
       await doPlay(incomingSong);
       break;
     }
@@ -795,7 +708,6 @@ async function handleMsg(msg) {
       setStatus('');
       if (role === 'host') { pauseBtn.textContent = '⏸ Пауза'; }
       if (role === 'host' || (syncAudioEnabled && audioUnlocked && audioBuffer && !isMuted)) {
-        // FIX: 5 замірів (було 3) — пауза могла "розбити" offset
         await resync(3);
         scheduleAudio();
         schedulePostStartCorrections();
@@ -855,8 +767,6 @@ async function handleMsg(msg) {
             }
           }
           if (playing && !paused && startTime !== null) {
-            // Після завантаження — ще заміри для точного старту "на льоту"
-            await resync(2);
             scheduleAudio();
             schedulePostStartCorrections();
           }
@@ -908,8 +818,9 @@ async function doPlay(song) {
   resetScroll(); setStatus(''); startAnim(); startScroll();
 
   if (role === 'host') {
-    // Хост: resync перед стартом — є 3 секунди запасу
-    await resync(3);
+    // Хост: offset вже свіжий з playBtn handler — НЕ робимо resync тут.
+    // resync(5) в doPlay давав ~200ms затримки після startTime, що
+    // зсувало хоста відносно клієнтів.
     scheduleAudio();
     schedulePostStartCorrections();
 
@@ -930,8 +841,6 @@ async function doPlay(song) {
         return;
       }
     }
-    // Після завантаження — ще 4 заміри вже з точним offset
-    await resync(2);
     scheduleAudio();
     schedulePostStartCorrections();
   }
@@ -963,6 +872,9 @@ playBtn?.addEventListener('click', async () => {
     }
     playBtn.disabled = false;
   }
+  // Оновлюємо offset безпосередньо перед відправкою play
+  // Це дає хосту свіжий offset без затримки в doPlay
+  await resync(3);
   ws.send(JSON.stringify({ type: 'play', song }));
 });
 
