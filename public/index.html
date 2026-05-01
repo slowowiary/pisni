@@ -262,7 +262,10 @@
 
     <!-- Кімната -->
     <div id="room-view" hidden style="width:100%;display:flex;flex-direction:column;align-items:center;gap:1.2rem">
-
+      <label id="sync-audio-label" hidden>
+        <input type="checkbox" id="sync-audio-check">
+        📻 Грати музику на всіх пристроях
+      </label>
       <p id="room-url-label">Поділіться посиланням з друзями</p>
       <div id="room-url-row">
         <div id="room-url" title="Натисніть, щоб скопіювати"></div>
@@ -285,10 +288,7 @@
         <div id="song-picker-title">Список пісень</div>
         <ul id="song-list"></ul>
       </div>
-      <label id="sync-audio-label" hidden>
-        <input type="checkbox" id="sync-audio-check">
-        📻 Грати музику на всіх пристроях
-      </label>
+
     </div>
 
   </main>
