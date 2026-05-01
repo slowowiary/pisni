@@ -353,5 +353,29 @@ document.addEventListener('click', () => {
       });
     });
   </script>
+  <!-- Модальне вікно пожертвування -->
+  <div id="donate-modal-overlay">
+    <div id="donate-modal">
+      <button id="donate-modal-close" onclick="document.getElementById('donate-modal-overlay').classList.remove('open')">×</button>
+      <h3>❤️ Пожертвувати</h3>
+      <div class="donate-church">Kościół Zielonoświątkowy<br>"Słowo Wiary" w Warszawie</div>
+      <table>
+        <tr><td>PLN</td><td>PL41 1090 1753 0000 0001 4197 1368</td></tr>
+        <tr><td>USD</td><td>PL38 1090 1753 0000 0001 4358 7927</td></tr>
+        <tr><td>NIP</td><td>5242817003</td></tr>
+        <tr><td>Regon</td><td>366142357</td></tr>
+        <tr><td>Адреса</td><td>Wyborna 20, 03-681 Warszawa</td></tr>
+        <tr><td>Тел</td><td>+48 504 739 000</td></tr>
+      </table>
+      <a class="donate-link" href="https://form.jotform.com/231102937473352" target="_blank" rel="noopener">💳 Перейти до оплати</a>
+    </div>
+  </div>
+ 
+ 
+<script>
+  document.getElementById('donate-modal-overlay').addEventListener('click', function(e) {
+    if (e.target === this) this.classList.remove('open');
+  });
+</script>
 </body>
 </html>
