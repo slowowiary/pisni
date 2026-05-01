@@ -29,6 +29,41 @@ let syncAudioEnabled = false; // хост увімкнув "грати на вс
 let clockSamples   = [];
 let offset         = 0;
 
+// ── Лічильник HTTP-запитів (для дебагу) ──────────────────────────────────────
+const reqCount = { total: 0, session: 0 };
+function countReq() { reqCount.total++; reqCount.session++; updateDebugPanel(); }
+
+// ── Debug-панель ─────────────────────────────────────────────────────────────
+let debugEl = null;
+let lastSyncError = null;   // остання помилка синхрону в секундах
+let lastRTT       = null;   // останній RTT в мс
+let lastSyncSrc   = '—';    // 'http' або 'ws'
+
+function initDebugPanel() {
+  debugEl = document.createElement('div');
+  debugEl.id = 'debug-panel';
+  debugEl.style.cssText = [
+    'position:fixed','bottom:6px','left:0','right:0',
+    'text-align:center','font-size:11px','color:#888',
+    'pointer-events:none','z-index:9999','font-family:monospace',
+    'line-height:1.6','padding:0 8px',
+  ].join(';');
+  document.body.appendChild(debugEl);
+  updateDebugPanel();
+}
+
+function updateDebugPanel() {
+  if (!debugEl) return;
+  const errMs = lastSyncError !== null
+    ? (lastSyncError * 1000).toFixed(1).replace(/^([^-])/, '+$1') + ' ms'
+    : '— ms';
+  const rtt   = lastRTT !== null ? lastRTT.toFixed(0) + ' ms RTT' : '—';
+  const src   = lastSyncSrc;
+  const reqs  = reqCount.session;
+  debugEl.textContent =
+    `sync: ${errMs}  |  ${rtt}  |  via ${src}  |  HTTP req this session: ${reqs}`;
+}
+
 // UI
 let lyrics         = [];
 let animFrame      = null;
@@ -143,6 +178,7 @@ function stopNode() {
     try { sourceNode.disconnect(); } catch {}
     sourceNode = null;
   }
+  resetPlaybackRate();
 }
 
 function songEnded() {
@@ -159,36 +195,69 @@ function songEnded() {
 // =============================================================================
 function serverNow() { return Date.now() + offset; }
 
-function addSample(srvTime, t0) {
+function addSample(srvTime, t0, src) {
   const rtt = Date.now() - t0;
+  lastRTT     = rtt;
+  lastSyncSrc = src || '?';
   clockSamples.push({ off: srvTime - (t0 + rtt / 2), rtt });
   if (clockSamples.length > 12) clockSamples.shift();
   const sorted  = [...clockSamples].sort((a, b) => a.rtt - b.rtt);
   const use     = sorted.slice(0, Math.max(1, Math.floor(sorted.length * 0.7)));
   const minRtt  = use[0].rtt;
-  let ws = 0, os = 0;
-  for (const s of use) { const w = minRtt / s.rtt; ws += w; os += s.off * w; }
-  offset = os / ws;
+  let wsum = 0, osum = 0;
+  for (const s of use) { const w = minRtt / s.rtt; wsum += w; osum += s.off * w; }
+  offset = osum / wsum;
+  updateDebugPanel();
 }
 
-// Початкова синхронізація при вході
+// Початкова синхронізація при вході — 4 послідовних HTTP заміри.
+// Цього достатньо для точного старту; далі синхроніземось через WS pong.
 async function syncOnEntry(id) {
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 4; i++) {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${id}/time`).catch(() => null);
-    if (res?.ok) addSample((await res.json()).serverTime, t0);
-    if (i < 7) await new Promise(r => setTimeout(r, 20));
+    countReq();
+    if (res?.ok) addSample((await res.json()).serverTime, t0, 'http');
+    if (i < 3) await new Promise(r => setTimeout(r, 30));
   }
 }
 
-// Послідовні заміри — повертає найкращий offset
-// Використовуємо паралельні + послідовні для швидкості та точності
-async function resync(count = 5) {
-  for (let i = 0; i < count; i++) {
+// ── Синхронізація через WebSocket ping (0 HTTP запитів!) ─────────────────────
+// Надсилаємо ping по відкритому WS і чекаємо pong із serverTime.
+// Якщо WS не відкритий — fallback на HTTP (рідкість: тільки при reconnect).
+// count — кількість замірів для усереднення.
+function wsPing() {
+  return new Promise((resolve, reject) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { reject(new Error('ws closed')); return; }
     const t0  = Date.now();
-    const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
-    if (res?.ok) addSample((await res.json()).serverTime, t0);
-    if (i < count - 1) await new Promise(r => setTimeout(r, 30));
+    const tid = setTimeout(() => reject(new Error('pong timeout')), 3000);
+    // Одноразовий слухач для наступного pong
+    function onMsg(e) {
+      let m; try { m = JSON.parse(e.data); } catch { return; }
+      if (m.type !== 'pong') return;
+      ws.removeEventListener('message', onMsg);
+      clearTimeout(tid);
+      addSample(m.serverTime, t0, 'ws');
+      resolve(Date.now() - t0); // RTT
+    }
+    ws.addEventListener('message', onMsg);
+    ws.send(JSON.stringify({ type: 'ping', clientTime: t0 }));
+  });
+}
+
+// Виконує count WS ping-замірів. При помилці — HTTP-fallback.
+async function resync(count = 3) {
+  for (let i = 0; i < count; i++) {
+    try {
+      await wsPing();
+    } catch {
+      // WS недоступний — HTTP fallback (рахуємо як запит)
+      const t0  = Date.now();
+      const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
+      countReq();
+      if (res?.ok) addSample((await res.json()).serverTime, t0, 'http-fb');
+    }
+    if (i < count - 1) await new Promise(r => setTimeout(r, 40));
   }
 }
 
@@ -198,79 +267,171 @@ function getActualPos() {
   return sourceNode._off + (audioCtx.currentTime - sourceNode._when);
 }
 
-// Перевірка дрейфу і корекція якщо потрібно (ціль: < 20ms)
+// ── Перевірка і корекція синхрону — без HTTP запитів ─────────────────────────
+// Отримуємо свіжий серверний час через WS ping (безкоштовно!),
+// рахуємо drift і або seekаємо, або плавно коригуємо playbackRate.
 async function checkAndCorrect() {
   if (!playing || paused || startTime === null) return;
-  const t0  = Date.now();
-  const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
-  if (!res?.ok) return;
-  addSample((await res.json()).serverTime, t0);
-  const expected = (serverNow() - startTime) / 1000;
-  const actual   = getActualPos();
-  if (actual === null) { scheduleAudio(); return; }
-  const drift = Math.abs(actual - expected);
-  if (drift > 0.020) { // > 20ms — коригуємо (було 30ms)
+
+  // Один WS ping — оновлює offset і lastRTT
+  try { await wsPing(); } catch {
+    // Якщо WS впав — не блокуємось, просто пропускаємо цей цикл
+    return;
+  }
+
+  const targetPos = (serverNow() - startTime) / 1000;
+  const actualPos = getActualPos();
+
+  if (actualPos === null) { scheduleAudio(); return; }
+
+  const error    = targetPos - actualPos;   // + = відстаємо, - = поспішаємо
+  const absError = Math.abs(error);
+  lastSyncError  = error;
+  updateDebugPanel();
+
+  const CORRECTION_WINDOW = 3.0;
+  const MAX_RATE_DELTA    = 0.02;
+  const MIN_RATE_CHANGE   = 0.001;
+  const RATE_LERP         = 0.15;
+
+  // (A) > 120 мс — жорсткий seek + увімкнути м'яку корекцію
+  if (absError > 0.120) {
     scheduleAudio();
+    startRateRamp(1 + clamp(error / CORRECTION_WINDOW, -MAX_RATE_DELTA, MAX_RATE_DELTA));
+    return;
+  }
+  // (B) 20–120 мс — тільки playbackRate
+  if (absError > 0.020) {
+    const targetRate = 1 + clamp(error / CORRECTION_WINDOW, -MAX_RATE_DELTA, MAX_RATE_DELTA);
+    startRateRamp(targetRate);
+    return;
+  }
+  // (C) < 20 мс — мінімальна або нульова корекція
+  if (absError > 0.005) {
+    const targetRate = 1 + clamp(error / CORRECTION_WINDOW, -MAX_RATE_DELTA, MAX_RATE_DELTA);
+    if (sourceNode?.playbackRate) {
+      const diff = targetRate - currentPlaybackRate;
+      if (Math.abs(diff) >= MIN_RATE_CHANGE) {
+        currentPlaybackRate += diff * RATE_LERP;
+        sourceNode.playbackRate.linearRampToValueAtTime(
+          currentPlaybackRate, audioCtx.currentTime + 0.3);
+      }
+    }
+  } else {
+    applyPlaybackRate(1.0);
   }
 }
 
-// Планує серію корекцій після старту + постійний інтервал кожні 20с
-let correctionTimers = [];
-let periodicSyncInterval = null;
+function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+
+// ── Адаптивна синхронізація (без HTTP!) ──────────────────────────────────────
+// checkAndCorrect() сам робить WS ping → не потрібен окремий resync().
+// Інтервал адаптується: часто при рассинхроні, рідко при ідеальному стані.
+
+let correctionTimers    = [];
+let periodicSyncTimeout = null;
+let consecutiveOk       = 0;
+let syncIntervalMs      = 2000;
+
+// Адаптивний sync-стан для playbackRate
+const CORRECTION_WINDOW = 3.0;
+const MAX_RATE_DELTA    = 0.02;
+const RATE_LERP         = 0.12;
+const MIN_RATE_CHANGE   = 0.001;
+let currentPlaybackRate = 1.0;
+let rateRampTimer       = null;
+
+function applyPlaybackRate(targetRate) {
+  if (!sourceNode?.playbackRate || !audioCtx) return;
+  const clamped = Math.max(1 - MAX_RATE_DELTA, Math.min(1 + MAX_RATE_DELTA, targetRate));
+  const diff    = clamped - currentPlaybackRate;
+  if (Math.abs(diff) < MIN_RATE_CHANGE) return;
+  currentPlaybackRate += diff * RATE_LERP;
+  sourceNode.playbackRate.linearRampToValueAtTime(
+    currentPlaybackRate, audioCtx.currentTime + 0.2);
+}
+
+function resetPlaybackRate() {
+  currentPlaybackRate = 1.0;
+  if (sourceNode?.playbackRate)
+    sourceNode.playbackRate.setValueAtTime(1.0, audioCtx?.currentTime || 0);
+  if (rateRampTimer) { clearInterval(rateRampTimer); rateRampTimer = null; }
+}
+
+function startRateRamp(targetRate) {
+  if (rateRampTimer) { clearInterval(rateRampTimer); rateRampTimer = null; }
+  let steps = 0;
+  rateRampTimer = setInterval(() => {
+    if (!sourceNode || !playing || paused) { clearInterval(rateRampTimer); rateRampTimer = null; return; }
+    applyPlaybackRate(targetRate);
+    if (++steps > 20 || Math.abs(currentPlaybackRate - targetRate) < MIN_RATE_CHANGE) {
+      clearInterval(rateRampTimer); rateRampTimer = null;
+    }
+  }, 80);
+}
 
 function schedulePostStartCorrections() {
   correctionTimers.forEach(t => clearTimeout(t));
   correctionTimers = [];
-  // Дві перевірки після старту: 3s і 6s (раніше — пісня ще не грає або дрейф нульовий)
-  [3000, 6000].forEach(delay => {
-    const t = setTimeout(() => checkAndCorrect(), delay);
-    correctionTimers.push(t);
-  });
-  // Потім кожні 10 секунд — щоб дрейф не накопичувався
+  consecutiveOk  = 0;
+  syncIntervalMs = 1500;
+
+  // Перша перевірка через 2.5с (пісня вже грає, але ще свіжа)
+  correctionTimers.push(setTimeout(() => checkAndCorrect(), 2500));
   startPeriodicSync();
 }
 
 function startPeriodicSync() {
   stopPeriodicSync();
-  periodicSyncInterval = setInterval(async () => {
-    if (!playing || paused) return;
-    // 3 заміри для точного offset, потім перевірка дрейфу
-    await resync(3);
+  async function tick() {
+    if (!playing || paused) return scheduleNext(5000);
     await checkAndCorrect();
-  }, 10000);
+    // Адаптуємо інтервал залежно від consecutiveOk
+    // (consecutiveOk оновлюється всередині checkAndCorrect через lastSyncError)
+    const absErr = lastSyncError !== null ? Math.abs(lastSyncError) : 0.1;
+    if (absErr < 0.005) {
+      consecutiveOk++;
+      if (consecutiveOk >= 8)       syncIntervalMs = Math.min(syncIntervalMs * 1.5, 40000);
+      else if (consecutiveOk >= 4)  syncIntervalMs = Math.min(syncIntervalMs * 1.2, 12000);
+    } else {
+      consecutiveOk  = 0;
+      if (absErr > 0.050)           syncIntervalMs = 1000;
+      else if (absErr > 0.020)      syncIntervalMs = 2000;
+      else                          syncIntervalMs = 4000;
+    }
+    scheduleNext(syncIntervalMs);
+  }
+  function scheduleNext(ms) {
+    periodicSyncTimeout = setTimeout(() => tick().catch(console.error), ms);
+  }
+  scheduleNext(syncIntervalMs);
 }
 
 function stopPeriodicSync() {
-  if (periodicSyncInterval) {
-    clearInterval(periodicSyncInterval);
-    periodicSyncInterval = null;
-  }
+  if (periodicSyncTimeout) { clearTimeout(periodicSyncTimeout); periodicSyncTimeout = null; }
 }
 
 function cancelCorrections() {
   correctionTimers.forEach(t => clearTimeout(t));
   correctionTimers = [];
   stopPeriodicSync();
+  if (rateRampTimer) { clearInterval(rateRampTimer); rateRampTimer = null; }
+  resetPlaybackRate();
 }
 
 // =============================================================================
 // Wake Lock
 // =============================================================================
 async function requestWakeLock() {
-  if (!('wakeLock' in navigator)) return;
-  // Не запитуємо повторно якщо вже активний
-  if (wakeLock && !wakeLock.released) return;
-  try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+  if ('wakeLock' in navigator) {
+    try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+  }
 }
 function releaseWakeLock() {
-  // Хост тримає wake lock постійно — не відпускаємо під час сесії
   if (role === 'host') return;
   if (wakeLock) { wakeLock.release(); wakeLock = null; }
 }
 document.addEventListener('visibilitychange', () => {
-  // Браузер скасовує wake lock при переході вкладки у фон —
-  // відновлюємо як тільки вкладка знову стає активною.
-  // Для хоста — завжди; для клієнта — тільки під час відтворення.
   if (document.visibilityState !== 'visible') return;
   if (role === 'host' || (playing && !paused)) requestWakeLock();
 });
@@ -307,6 +468,7 @@ function updateScroll() {
 async function loadSongList() {
   try {
     const res = await fetch(WORKER_URL + '/api/songs');
+    countReq();
     songs = res.ok ? await res.json() : ['test'];
   } catch { songs = ['test']; }
 }
@@ -374,7 +536,7 @@ if (headerToggle) {
     updateSpeakerUI();
     // Якщо вмикаємо звук під час відтворення — синхронізуємось
     if (!isMuted && syncAudioEnabled && audioUnlocked && playing && !paused && startTime !== null) {
-      resync(4).then(() => { scheduleAudio(); schedulePostStartCorrections(); });
+      resync(2).then(() => { scheduleAudio(); schedulePostStartCorrections(); });
     } else if (isMuted) {
       stopNode();
     }
@@ -394,6 +556,7 @@ function getClientId() {
 // Boot
 // =============================================================================
 async function init() {
+  initDebugPanel();
   const p = new URLSearchParams(location.search).get('p');
   if (p) history.replaceState(null, '', p);
   await loadSongList();
@@ -443,6 +606,7 @@ createBtn?.addEventListener('click', async () => {
     const cid = crypto.randomUUID();
     localStorage.setItem('karaoke_client_id', cid);
     const res = await fetch(`${WORKER_URL}/create?clientId=${encodeURIComponent(cid)}`);
+    countReq();
     if (!res.ok) throw new Error(res.status);
     const { roomId: id } = await res.json();
     localStorage.setItem('karaoke_host_room', id);
@@ -500,7 +664,7 @@ async function handleMsg(msg) {
     // ── Підключення ──────────────────────────────────────────────────────────
     case 'joined': {
       role = msg.role;
-      addSample(msg.serverTime, Date.now() - 30);
+      addSample(msg.serverTime, Date.now() - 30, 'ws-join');
 
       if (role === 'host') {
         joinScreen.hidden = true;
@@ -516,7 +680,6 @@ async function handleMsg(msg) {
         syncAudioEnabled = saved;
         if (saved) ws.send(JSON.stringify({ type: 'sync_audio', enabled: true }));
         setStatus('Виберіть пісню зі списку нижче.');
-        requestWakeLock(); // хост: тримаємо екран активним увесь час сесії
 
       } else {
         // Клієнт
@@ -666,6 +829,8 @@ async function handleMsg(msg) {
 // =============================================================================
 async function doPlay(song) {
   playing = true; paused = false;
+  reqCount.session = 0; // скидаємо лічильник на кожну пісню
+  updateDebugPanel();
   requestWakeLock();
 
   if (role === 'host') {
@@ -689,7 +854,7 @@ async function doPlay(song) {
 
   if (role === 'host') {
     // Хост: resync перед стартом — є 3 секунди запасу
-    await resync(5);
+    await resync(3);
     scheduleAudio();
     schedulePostStartCorrections();
 
