@@ -659,6 +659,15 @@ async function doPlay(song) {
   requestWakeLock();
 
   if (role === 'host') {
+    // Буфер вже завантажено у playBtn handler до відправки команди play
+    // Якщо з якоїсь причини буфер відсутній — скидаємо стан і виходимо
+    if (!audioBuffer) {
+      playing = false;
+      playBtn.hidden = false; playBtn.textContent = '▶ Грати'; playBtn.disabled = false;
+      pauseBtn.hidden = true;
+      setStatus('⚠ Буфер не завантажено — натисніть «Грати» ще раз');
+      return;
+    }
     playBtn.hidden = false;
     playBtn.textContent = '⏹ Стоп';
     pauseBtn.hidden = false; pauseBtn.textContent = '⏸ Пауза';
@@ -669,9 +678,6 @@ async function doPlay(song) {
   resetScroll(); setStatus(''); startAnim(); startScroll();
 
   if (role === 'host') {
-    // Буфер вже завантажено у playBtn handler до відправки команди play
-    // Якщо з якоїсь причини буфер відсутній — тихо виходимо
-    if (!audioBuffer) { setStatus('⚠ Буфер не завантажено'); return; }
     // Хост: resync перед стартом — є 3 секунди запасу
     await resync(5);
     scheduleAudio();
