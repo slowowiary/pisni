@@ -198,13 +198,21 @@
       padding: 0 2px;
       /* плавна поява/зникнення жовтого фону */
       background-color: transparent;
-      transition: background-color 1.2s ease, color 0.4s ease;
+      box-shadow: 0 0 0px 0px transparent;
+      transition: background-color 1.2s ease, color 0.4s ease, box-shadow 1.2s ease;
     }
     .word::before { content: attr(data-word); display: block; font-weight: 700; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
-    .word.done   { color: #666; background-color: transparent; }
+    .word.done   { color: #666; background-color: transparent; box-shadow: 0 0 0px 0px transparent; }
+    /* pre-active: фон починає проявлятись за 0.5s до таймінгу */
+    .word.pre-active {
+      background-color: rgba(100, 200, 255, 0.12);
+      box-shadow: 0 0 10px 6px rgba(100, 200, 255, 0.08);
+    }
+    /* active: повна яскравість з розмитими краями */
     .word.active {
       color: #003a5c;
       background-color: rgba(100, 200, 255, 0.45);
+      box-shadow: 0 0 14px 8px rgba(100, 200, 255, 0.25);
     }
 
     /* ── Список пісень ──────────────────────────────────────── */
