@@ -1435,9 +1435,13 @@ async function handleMsg(msg) {
       setStatus('');
       if (role === 'host') { pauseBtn.textContent = '⏸ Пауза'; }
       if (role === 'host') {
-        // Host already did preSync before sending resume — just schedule
-        scheduleAudio();
-        startAdaptiveSyncLoop();
+        // Host already started via pauseBtn handler — just sync startTime
+        // Don't call scheduleAudio again to avoid double-start
+        if (Math.abs(startTime - msg.startTime) > 200) {
+          startTime = msg.startTime; // server's startTime differs — resync
+          scheduleAudio();
+        }
+        // adaptiveSyncLoop already running from pauseBtn handler
       } else if (syncAudioEnabled && audioUnlocked && audioBuffer && !isMuted) {
         // Clients sync offset fresh, parallel pattern like initial play
         await preSync();
@@ -1652,13 +1656,16 @@ playBtn?.addEventListener('click', async () => {
 pauseBtn?.addEventListener('click', async () => {
   if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host' || !playing) return;
   if (paused) {
-    // Resume — apply locally immediately
+    // Resume — apply locally immediately with optimistic startTime
     paused = false;
     pauseBtn.textContent = '⏸ Пауза';
     setStatus('');
     startAnim(); startScroll(); requestWakeLock();
     await preSync();
-    ws.send(JSON.stringify({ type: 'resume', song: currentSong }));
+    // Set startTime optimistically (server will set same value: now+2000)
+    // This prevents double-start when broadcast arrives back at host
+    startTime = serverNow() + 2000;
+    try { ws.send(JSON.stringify({ type: 'resume', song: currentSong })); } catch {}
     scheduleAudio();
     startAdaptiveSyncLoop();
   } else {
