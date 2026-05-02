@@ -202,7 +202,7 @@ export class KaraokeRoom {
         this.pauseTime = Date.now();
         await this.state.storage.put('paused',    true);
         await this.state.storage.put('pauseTime', this.pauseTime);
-        this.broadcastRetry({ type: 'pause', pauseTime: this.pauseTime });
+        this.broadcast({ type: 'pause', pauseTime: this.pauseTime });
         break;
 
       case 'resume':
@@ -241,7 +241,7 @@ export class KaraokeRoom {
         if (session.role !== 'host') return;
         this.volume = Math.max(0, Math.min(1, msg.volume ?? 0.8));
         // Broadcast to all including host so UI stays in sync
-        this.broadcastRetry({ type: 'set_volume', volume: this.volume });
+        this.broadcast({ type: 'set_volume', volume: this.volume });
         break;
 
       case 'state_check':
