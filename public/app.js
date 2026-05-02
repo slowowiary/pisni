@@ -255,7 +255,10 @@ async function ensureBuffer(song) {
   initAudio();
   loadingSong = song;
   try {
-    const res = await fetch('/songs/' + song + '/' + song + '.mp3');
+    const _bufCtrl = new AbortController();
+    const _bufTimer = setTimeout(() => _bufCtrl.abort(), 15000); // 15s max
+    const res = await fetch('/songs/' + song + '/' + song + '.mp3',
+      { signal: _bufCtrl.signal }).finally(() => clearTimeout(_bufTimer));
     if (!res.ok) throw new Error('MP3 not found: ' + song);
     const arr = await res.arrayBuffer();
     if (loadingSong !== song) throw new Error('Song changed during load');
@@ -409,26 +412,39 @@ async function syncOnEntry(id) {
 // під час відтворення скидання дасть різкий стрибок offset → хибний drift
 async function preSync() {
   if (DEBUG_SYNC) _dbg.event('preSync', `start offset=${offset.toFixed(1)}ms playing=${playing}`);
-  // Reset clockSamples on start, or if offset is absurd (>24h — broken device clock)
-  // Do NOT zero offset on corrupt reset — keep previous value as best estimate
-  // until new valid samples arrive. Zeroing causes exp=-3528s nonsense.
   if (!playing || Math.abs(offset) > 86400000) {
     clockSamples = [];
-    if (Math.abs(offset) > 86400000) {
-      if (DEBUG_SYNC) _dbg.event('preSync', `offset absurd (${offset.toFixed(0)}ms), resetting samples`);
-      // Keep offset as-is — new samples will correct it via EMA
-    }
   }
+  // Overall 5s timeout for entire preSync — if network is very slow,
+  // proceed with current offset rather than hanging the start
+  let _preSyncDone = false;
+  const _preSyncTimeout = setTimeout(() => {
+    if (!_preSyncDone && DEBUG_SYNC)
+      _dbg.event('preSync', 'timeout — proceeding with current offset');
+  }, 5000);
+  try {
   for (let i = 0; i < 6; i++) {
     const t0  = Date.now();
-    const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
-    if (res?.ok) {
-      addSample((await res.json()).serverTime, t0);
-      requestState.lastRequestTime = Date.now();
+    // 2s timeout per request — prevents preSync from hanging on bad network
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2000);
+    try {
+      const res = await fetch(`${WORKER_URL}/room/${roomId}/time`,
+        { signal: controller.signal }).catch(() => null);
+      if (res?.ok) {
+        addSample((await res.json()).serverTime, t0);
+        requestState.lastRequestTime = Date.now();
+      }
+    } finally {
+      clearTimeout(timer);
     }
     if (i < 5) await new Promise(r => setTimeout(r, 30));
   }
   if (DEBUG_SYNC) _dbg.event('preSync', `end offset=${offset.toFixed(1)}ms`);
+  } finally {
+    _preSyncDone = true;
+    clearTimeout(_preSyncTimeout);
+  }
 }
 
 // Поточна позиція відтворення в секундах
@@ -1602,7 +1618,7 @@ playBtn?.addEventListener('click', async () => {
   await preSync();
   // Guard against double-tap
   if (playing) return;
-  ws.send(JSON.stringify({ type: 'play', song }));
+  try { ws.send(JSON.stringify({ type: 'play', song })); } catch {}
   // Host starts audio immediately without waiting for own broadcast.
   // On bad network, broadcast may be delayed — host would stay silent
   // while clients already play. Instead: host schedules audio right now
