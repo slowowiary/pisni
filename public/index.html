@@ -205,17 +205,17 @@
     .word.done { color: #888; text-shadow: none; }
     .word.pre-active {
       text-shadow:
-        0 0 12px rgba(255, 60, 60, 0.45),
-        0 0 28px rgba(255, 60, 60, 0.25),
-        0 0 50px rgba(255, 60, 60, 0.12);
+        0 0 12px rgba(255, 110, 110, 0.35),
+        0 0 28px rgba(255, 110, 110, 0.18),
+        0 0 50px rgba(255, 110, 110, 0.08);
     }
     .word.active {
       text-shadow:
-        0 0 8px rgba(255, 60, 60, 0.80),
-        0 0 20px rgba(255, 60, 60, 0.60),
-        0 0 40px rgba(255, 60, 60, 0.35),
-        0 0 70px rgba(255, 60, 60, 0.18),
-        0 0 100px rgba(255, 60, 60, 0.08);
+        0 0 8px rgba(255, 110, 110, 0.65),
+        0 0 20px rgba(255, 110, 110, 0.45),
+        0 0 40px rgba(255, 110, 110, 0.25),
+        0 0 70px rgba(255, 110, 110, 0.12),
+        0 0 100px rgba(255, 110, 110, 0.06);
     }
 
     /* ── Список пісень ──────────────────────────────────────── */
@@ -486,6 +486,15 @@ document.addEventListener('click', () => {
   if (v && v.paused) v.play().catch(() => {});
 }, { once: true });
 </script>
+
+  <!-- NoSleep: запобігає гасінню екрана на iOS -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/nosleep.js/0.12.0/NoSleep.min.js"></script>
+  <script>
+    const _noSleep = new NoSleep();
+    document.addEventListener('click', () => {
+      _noSleep.enable().catch(() => {});
+    }, { once: true });
+  </script>
 
   <!-- QR-код: бібліотека без бекенду -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
