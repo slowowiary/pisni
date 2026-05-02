@@ -283,15 +283,22 @@ async function scheduleAudio() {
     try { await audioCtx.resume(); } catch {}
   }
   const msUntil = startTime - serverNow();
-  const elapsed = Math.max(0, -msUntil / 1000);
-  // No SAFETY_OFFSET in file position — adding it to 'off' causes getActualPos()
-  // to return (elapsed + SAFETY_OFFSET) which is always ~30ms above expected,
-  // creating a permanent fake drift that triggers endless restarts.
-  // Web Audio src.start(when, off) with 'when' in the future provides its own buffer.
-  const off = Math.min(elapsed, audioBuffer.duration - 0.01);
+  // When catching up (msUntil < 0): recalculate elapsed right before src.start()
+  // to account for time spent in this function (preSync ~300ms, AudioContext ops).
+  // When starting in future (msUntil > 0): use normal calculation.
+  let off, when;
+  if (msUntil >= 0) {
+    // Starting in the future — schedule precisely
+    off  = 0;
+    when = audioCtx.currentTime + msUntil / 1000;
+  } else {
+    // Already past startTime — recalculate elapsed at the last possible moment
+    // to minimize the gap between calculation and actual src.start()
+    const elapsedNow = Math.max(0, (serverNow() - startTime) / 1000);
+    off  = Math.min(elapsedNow, audioBuffer.duration - 0.01);
+    when = audioCtx.currentTime + 0.005;
+  }
   if (off >= audioBuffer.duration) return;
-  const when = Math.max(audioCtx.currentTime + 0.005,
-                        audioCtx.currentTime + msUntil / 1000);
   const src = audioCtx.createBufferSource();
   src.buffer = audioBuffer;
   src._when  = when;
@@ -357,15 +364,17 @@ function addSample(srvTime, t0) {
   for (const s of use) { const w = minRtt / s.rtt; ws += w; os += s.off * w; }
   const newOffset = os / ws;
 
-  if (clockSamples.length <= 1) {
-    // First sample after reset — trust fully (no previous value to compare)
-    const prevOff = offset;
+  const prevOff = offset;
+  if (clockSamples.length <= 1 && offset === 0) {
+    // Very first sample ever — no prior reference, trust fully
     offset = newOffset;
     if (DEBUG_SYNC) _dbg.event('offset', `${prevOff.toFixed(1)}→${offset.toFixed(1)}ms (first)`);
   } else {
-    const prevOff = offset;
-    // EMA 80/20 with 40ms/step clamp
-    const blended = offset * 0.8 + newOffset * 0.2;
+    // Always use EMA — even for first sample after reset if we have prior offset.
+    // This prevents a single high/low outlier from dominating the result.
+    // 50/50 blend for first few samples (more responsive), then 80/20
+    const alpha   = clockSamples.length <= 2 ? 0.5 : 0.2;
+    const blended = offset * (1 - alpha) + newOffset * alpha;
     const step    = Math.max(-40, Math.min(40, blended - offset));
     offset        = offset + step;
     if (DEBUG_SYNC) {
@@ -401,14 +410,14 @@ async function preSync() {
       // Keep offset as-is — new samples will correct it via EMA
     }
   }
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 6; i++) {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
     if (res?.ok) {
       addSample((await res.json()).serverTime, t0);
       requestState.lastRequestTime = Date.now();
     }
-    if (i < 3) await new Promise(r => setTimeout(r, 30));
+    if (i < 5) await new Promise(r => setTimeout(r, 30));
   }
   if (DEBUG_SYNC) _dbg.event('preSync', `end offset=${offset.toFixed(1)}ms`);
 }
@@ -715,12 +724,16 @@ async function adaptiveSyncLoop() {
       urgencyState.level          = Math.min(100, urgencyState.level + 20);
       requestState.stabilityScore = Math.max(0, requestState.stabilityScore - 10);
       if (DEBUG_SYNC) _dbg.event('RESTART', `smd=${smoothedDrift.toFixed(1)}ms drift=${drift.toFixed(1)}ms offset=${offset.toFixed(1)}ms`);
+      // Clear driftHistory so smd doesn't carry stale pre-restart values.
+      // Without this, smd stays negative for 3-4 cycles after restart,
+      // triggering ghost restarts even when drift is already fixed.
+      syncState.driftHistory = [];
+      syncState.stableCount  = 0;
+      syncState.pendingRestart = false;
       // Fresh offset before restart — stale offset causes landing 50-100ms off
       await preSync();
       scheduleAudio();
       // Reset rate to 1.0 after restart — pre-restart smoothedDrift is stale
-      // and calcTargetRate would push in the wrong direction.
-      // Next cycles will measure real post-restart drift and correct if needed.
       syncState.smoothedRate = 1.0;
       applyPlaybackRate(1.0);
 
