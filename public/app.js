@@ -565,6 +565,19 @@ function localCorrection() {
 
 async function adaptiveSyncLoop() {
   if (!playing || paused || startTime === null) { scheduleNext(); return; }
+
+  // Detect AudioContext suspension (tab backgrounded / screen locked on iOS/Android).
+  // When suspended, audioCtx.currentTime freezes → getActualPos() returns stale value.
+  if (audioCtx && audioCtx.state === 'suspended') {
+    try { await audioCtx.resume(); } catch {}
+    if (DEBUG_SYNC) _dbg.event('audioCtx', 'suspended — resumed, rescheduling');
+    syncState.driftHistory = [];
+    await preSync();
+    scheduleAudio();
+    scheduleNext();
+    return;
+  }
+
   const actual = getActualPos();
   if (actual === null) { scheduleNext(); return; }
 
@@ -624,7 +637,11 @@ async function adaptiveSyncLoop() {
   syncState.lastOffset = offset;
   // Only offset jump is a reliable noise signal.
   // absDrift > 80 was incorrectly filtering real large drifts as noise.
-  const isNoisy    = (offsetJump > 20 && syncState.driftHistory.length > 0);
+  // Detect AudioContext freeze: smd near zero but raw drift suddenly huge
+  // This happens when AudioContext suspends briefly (iOS/Android background)
+  // In this case treat as a restart trigger, not noise
+  const audioCtxFroze = Math.abs(drift) > 50 && Math.abs(smoothedForForce) < 10;
+  const isNoisy    = (offsetJump > 20 && syncState.driftHistory.length > 0) && !audioCtxFroze;
   if (!isNoisy) {
     syncState.driftHistory.push({ drift, timestamp: Date.now() });
     if (syncState.driftHistory.length > 8) syncState.driftHistory.shift();
@@ -672,16 +689,16 @@ async function adaptiveSyncLoop() {
   const absSmoothed = Math.abs(smoothedDrift);
 
   if (DEBUG_SYNC) {
-    const _needsAct = absSmoothed >= 15 || Math.abs(drift) > 40;
+    const _needsAct = absSmoothed >= 8 || Math.abs(drift) > 40;
     const _decision = !_needsAct ? 'idle'
       : (syncState.pendingRestart ? 'restart(pending)' : 'restart(first)');
     _dbg.log(`${((Date.now()-_DBG_START)/1000).toFixed(1)}s [cycle] req | off=${offset.toFixed(1)} exp=${expected.toFixed(3)} act=${actualNow.toFixed(3)} drift=${drift.toFixed(1)} smd=${smoothedDrift.toFixed(1)} dRate=${driftRate.toFixed(2)} rate=${syncState.smoothedRate.toFixed(4)} dec=${_decision} stab=${requestState.stabilityScore} urg=${urgencyState.level|0}`);
     _dbg.scheduleUiUpdate();
   }
 
-  // Also trigger restart if raw drift is already large even if smd hasn't caught up.
-  // smd with 8-sample buffer lags 40-80s; raw drift > 40ms is immediately audible.
-  const needsAction = absSmoothed >= 15 || Math.abs(drift) > 40;
+  // Threshold 8ms: catches systematic drift like c-6f82 (-7ms) that never reaches 15ms.
+  // Also trigger on raw drift > 40ms even if smd hasn't caught up.
+  const needsAction = absSmoothed >= 8 || Math.abs(drift) > 40;
 
   if (!needsAction) {
     // Dead zone — drift inaudible, slowly return rate to 1.0
