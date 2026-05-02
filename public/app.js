@@ -310,6 +310,7 @@ async function scheduleAudio() {
   syncState.ctxAnchorWall    = Date.now();
   syncState.ctxAnchorCtx     = audioCtx.currentTime;
   syncState.ctxThrottleRatio = 1.0;
+  syncState.ctxSamples       = [{ wall: Date.now(), ctx: audioCtx.currentTime }];
   if (DEBUG_SYNC) _dbg.event('scheduleAudio', `off=${off.toFixed(3)}s when=${when.toFixed(3)} startTime=${startTime} offset=${offset.toFixed(1)}ms`);
   sourceNode = src;
   src.onended = () => {
@@ -455,6 +456,8 @@ const syncState = {
   ctxAnchorWall:      null,  // Date.now() at last scheduleAudio
   ctxAnchorCtx:       null,  // audioCtx.currentTime at last scheduleAudio
   ctxThrottleRatio:   1.0,   // actualCtxRate / expectedCtxRate (1.0 = perfect)
+  // Rolling window for short-term freeze detection (5-10s window)
+  ctxSamples:         [],    // [{wall, ctx}] — last N samples for recent ratio
 };
 
 const requestState = {
@@ -714,22 +717,57 @@ async function adaptiveSyncLoop() {
   }
 
   // ── Detect AudioContext throttling ─────────────────────────────────────────
-  // Compare how fast audioCtx.currentTime advances vs wall clock.
-  // On throttled devices (Low Power Mode, iOS background) ctx runs slow.
-  // ctxThrottleRatio < 0.99 means ctx is at least 1% slower than real time.
-  if (syncState.ctxAnchorWall !== null) {
-    const wallElapsed = (Date.now() - syncState.ctxAnchorWall) / 1000;
-    const ctxElapsed  = audioCtx.currentTime - syncState.ctxAnchorCtx;
-    if (wallElapsed > 2.0) { // Need at least 2s of data to be reliable
-      const ratio = ctxElapsed / wallElapsed;
-      // EMA to smooth out measurement noise
-      syncState.ctxThrottleRatio = syncState.ctxThrottleRatio * 0.7 + ratio * 0.3;
-      if (DEBUG_SYNC && Math.abs(syncState.ctxThrottleRatio - 1.0) > 0.005) {
-        _dbg.event('ctx-throttle', `ratio=${syncState.ctxThrottleRatio.toFixed(4)} wall=${wallElapsed.toFixed(1)}s ctx=${ctxElapsed.toFixed(1)}s`);
+  // TWO detection methods:
+  // 1. Long-term EMA ratio (catches gradual throttle)
+  // 2. Short rolling window ~6s (catches iOS sudden freeze of 100-130ms)
+  //
+  // iOS pattern: ctx freezes suddenly for 100-130ms every 25-65s
+  // This shows up as ratio ~0.97 in a 5s window but ~0.999 in a 60s window
+  // → need short window to catch it
+
+  const nowWall = Date.now();
+  const nowCtx  = audioCtx ? audioCtx.currentTime : null;
+
+  if (nowCtx !== null && syncState.ctxAnchorWall !== null) {
+    // Push new sample to rolling window
+    syncState.ctxSamples.push({ wall: nowWall, ctx: nowCtx });
+    // Keep only samples from last 8 seconds
+    const cutoff = nowWall - 8000;
+    syncState.ctxSamples = syncState.ctxSamples.filter(s => s.wall >= cutoff);
+
+    // Long-term ratio (from scheduleAudio anchor)
+    const wallLong = (nowWall - syncState.ctxAnchorWall) / 1000;
+    const ctxLong  = nowCtx - syncState.ctxAnchorCtx;
+    if (wallLong > 2.0) {
+      const ratioLong = ctxLong / wallLong;
+      syncState.ctxThrottleRatio = syncState.ctxThrottleRatio * 0.8 + ratioLong * 0.2;
+    }
+
+    // Short-term ratio (rolling window — catches sudden freezes)
+    let shortRatio = 1.0;
+    if (syncState.ctxSamples.length >= 2) {
+      const oldest  = syncState.ctxSamples[0];
+      const wallShort = (nowWall - oldest.wall) / 1000;
+      const ctxShort  = nowCtx - oldest.ctx;
+      if (wallShort >= 1.5) { // Need at least 1.5s
+        shortRatio = ctxShort / wallShort;
       }
     }
+
+    if (DEBUG_SYNC) {
+      const longBad  = syncState.ctxThrottleRatio < 0.995;
+      const shortBad = shortRatio < 0.980;
+      if (longBad || shortBad) {
+        _dbg.event('ctx-throttle',
+          `long=${syncState.ctxThrottleRatio.toFixed(4)} short=${shortRatio.toFixed(4)}`);
+      }
+    }
+
+    // Throttled if EITHER long-term OR short-term ratio is bad
+    var isThrottled = syncState.ctxThrottleRatio < 0.995 || shortRatio < 0.980;
+  } else {
+    var isThrottled = false;
   }
-  const isThrottled = syncState.ctxThrottleRatio < 0.995; // ctx > 0.5% slower than wall
 
   // ── THREE-TIER DECISION ──────────────────────────────────────────────────────
   // Tier 1: Dead zone (|smd| < 3ms) — do nothing, return rate to 1.0
@@ -780,7 +818,10 @@ async function adaptiveSyncLoop() {
     const canRestart = (now - syncState.lastRestartTime) > 3000;
 
     const playingForMs     = startTime !== null ? (serverNow() - startTime) : 99999;
-    const skipConfirmation = playingForMs < 20000;
+    // Skip confirmation if:
+    // - first 20s of playback (initial sync)
+    // - drift is very large (>50ms) — iOS freeze, no need to wait another cycle
+    const skipConfirmation = playingForMs < 20000 || Math.abs(drift) > 50;
 
     if (!syncState.pendingRestart && !skipConfirmation) {
       syncState.pendingRestart  = true;
