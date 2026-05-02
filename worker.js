@@ -157,7 +157,8 @@ export class KaraokeRoom {
     session.ws.send(JSON.stringify({
       type: 'joined', role: session.role,
       clientId: session.clientId, serverTime: Date.now(),
-      syncAudio: this.syncAudio,  // передаємо поточний стан одразу
+      syncAudio: this.syncAudio,
+      volume: this.volume ?? 0.8,
     }));
     if (this.playing && !this.paused && this.startTime !== null) {
       session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio }));
@@ -185,7 +186,7 @@ export class KaraokeRoom {
         await this.state.storage.put('paused',    false);
         await this.state.storage.put('startTime', this.startTime);
         await this.state.storage.put('song',      this.song);
-        this.broadcast({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio });
+        this.broadcast({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio, volume: this.volume ?? 0.8 });
         break;
 
       case 'pause':
@@ -224,10 +225,16 @@ export class KaraokeRoom {
         await this.state.storage.put('syncAudio', msg.enabled);
         for (const s of this.sessions) {
           if (s.role !== 'host') {
-            // FIX: передаємо song щоб клієнти знали яку пісню завантажувати
             try { s.ws.send(JSON.stringify({ type: 'sync_audio', enabled: msg.enabled, song: this.song })); } catch {}
           }
         }
+        break;
+
+      case 'set_volume':
+        if (session.role !== 'host') return;
+        this.volume = Math.max(0, Math.min(1, msg.volume ?? 0.8));
+        // Broadcast to all including host so UI stays in sync
+        this.broadcast({ type: 'set_volume', volume: this.volume });
         break;
 
       case 'debug_log':
