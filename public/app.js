@@ -283,17 +283,17 @@ function shouldRequest(forcedByDrift) {
   return elapsed >= _jitter(base);
 }
 
-function calcTargetRate(smoothedDrift, driftRate) {
-  const timeToFix       = Math.max(2, Math.min(8,
-    Math.abs(smoothedDrift) / Math.max(Math.abs(driftRate), 0.001)
-  ));
-  const speedCorrection = smoothedDrift / timeToFix / 1000;
-  let   targetRate      = Math.max(0.95, Math.min(1.05, 1.0 - speedCorrection));
-  // Long-term drift — дуже слабкий внесок від накопиченого системного дрейфу
-  targetRate += syncState.longTermDrift * 0.000005;
-  targetRate  = Math.max(0.95, Math.min(1.05, targetRate));
-  // Dead zone — корекція < 0.3% не варта ризику артефактів
-  if (Math.abs(targetRate - 1.0) < 0.003) targetRate = 1.0;
+function calcTargetRate(driftRate) {
+  // Корекція тільки від швидкості зміни дрейфу (ms/sec), не від абсолютного drift
+  // driftRate > 0 → клієнт все більше випереджає → треба сповільнити
+  // driftRate < 0 → клієнт все більше відстає   → треба прискорити
+  // Множник 0.00005: при driftRate = 10ms/s корекція = 0.05% — майже непомітно
+  const raw        = -(driftRate * 0.00005);
+  const correction = Math.max(-0.005, Math.min(0.005, raw)); // clamp ±0.5%
+  let   targetRate = 1.0 + correction;
+  // Мертва зона: корекція < 0.4% → встановлюємо рівно 1.0
+  // Уникає постійних мікроколивань від шуму вимірювань
+  if (Math.abs(targetRate - 1.0) < 0.004) targetRate = 1.0;
   return targetRate;
 }
 
@@ -306,31 +306,25 @@ function localCorrection() {
   if (syncState.skipNext || !playing || paused || startTime === null) return;
   const actual = getActualPos();
   if (actual === null) return;
-  // Якщо offset застарів — тільки слабке повернення до 1.0
+  // Якщо offset застарів — тільки дуже повільне повернення до 1.0
   const isStale = (Date.now() - requestState.lastRequestTime) > 15000;
   if (isStale) {
-    syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
+    syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.02;
     applyPlaybackRate(syncState.smoothedRate);
     return;
   }
   const expected = (serverNow() - startTime) / 1000;
   const drift    = (actual - expected) * 1000;
   const absDrift = Math.abs(drift);
-  if (absDrift < 8) {
-    syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.2;
+  // Мертва зона 15ms — при малому drift нічого не робимо
+  if (absDrift < 15) {
+    syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
     applyPlaybackRate(syncState.smoothedRate);
     return;
   }
-  const history   = syncState.driftHistory;
-  const driftRate = history.length >= 2
-    ? (history[history.length-1].drift - history[0].drift) /
-      ((history[history.length-1].timestamp - history[0].timestamp) / 1000)
-    : 0;
-  const smoothedDrift    = history.length > 0
-    ? _weightedAverage(history.map(h => h.drift)) : drift;
-  const targetRate       = calcTargetRate(smoothedDrift, driftRate);
-  const lerpFactor       = Math.max(0.1, Math.min(0.35, absDrift / 40));
-  syncState.smoothedRate = syncState.smoothedRate + (targetRate - syncState.smoothedRate) * lerpFactor;
+  // Є помітний drift але немає свіжого серверного заміру —
+  // тільки дуже слабке наближення до 1.0, без активної корекції
+  syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.03;
   applyPlaybackRate(syncState.smoothedRate);
 }
 
@@ -394,21 +388,22 @@ async function adaptiveSyncLoop() {
   updateStability(drift, requestState.lastDrift);
   updateUrgency(drift, driftRate);
 
-  if (absDrift < 8) {
-    // Все добре — плавно до 1.0
-    syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.2;
+  if (absDrift < 15) {
+    // Мертва зона — drift непомітний, дуже повільно повертаємось до 1.0
+    // lerp 0.05: зміна за один цикл max ~0.25% — нечутно
+    syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
     applyPlaybackRate(syncState.smoothedRate);
 
-  } else if (absDrift <= 30) {
-    // Тільки playbackRate — без перезапуску
-    const targetRate       = calcTargetRate(smoothedDrift, driftRate);
-    const lerpFactor       = Math.max(0.15, Math.min(0.5, absDrift / 30));
+  } else if (absDrift <= 40) {
+    // Середній drift — тільки driftRate визначає напрямок і силу корекції
+    // Система інертна: lerp 0.08 означає що новий targetRate впливає повільно
+    const targetRate = calcTargetRate(driftRate);
     syncState.smoothedRate = syncState.smoothedRate +
-      (targetRate - syncState.smoothedRate) * lerpFactor;
+      (targetRate - syncState.smoothedRate) * 0.08;
     applyPlaybackRate(syncState.smoothedRate);
 
   } else {
-    // Великий дрейф — restart + playbackRate одночасно
+    // Великий drift — тільки restart, скидаємо rate до 1.0
     const now        = Date.now();
     const canRestart = (now - syncState.lastRestartTime) > 3000;
     if (canRestart) {
@@ -416,17 +411,12 @@ async function adaptiveSyncLoop() {
       syncState.skipNext        = true;
       urgencyState.level          = Math.min(100, urgencyState.level + 40);
       requestState.stabilityScore = Math.max(0, requestState.stabilityScore - 20);
-      const targetRate       = calcTargetRate(smoothedDrift, driftRate);
-      // Обмежений діапазон після restart — ±3% непомітно на слух
-      syncState.smoothedRate = Math.max(0.97, Math.min(1.03, targetRate));
+      syncState.smoothedRate = 1.0; // після restart — чистий старт без rate корекції
       scheduleAudio();
-      applyPlaybackRate(syncState.smoothedRate);
+      applyPlaybackRate(1.0);
     } else {
-      // Cooldown активний — тільки rate
-      const targetRate       = calcTargetRate(smoothedDrift, driftRate);
-      const lerpFactor       = Math.max(0.15, Math.min(0.5, absDrift / 40));
-      syncState.smoothedRate = syncState.smoothedRate +
-        (targetRate - syncState.smoothedRate) * lerpFactor;
+      // Cooldown активний — чекаємо, тільки слабке наближення до 1.0
+      syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
       applyPlaybackRate(syncState.smoothedRate);
     }
   }
