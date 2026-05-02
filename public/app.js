@@ -564,15 +564,15 @@ function localCorrection() {
   const expected = (serverNow() - startTime) / 1000;
   const drift    = (actual - expected) * 1000;
   const absDrift = Math.abs(drift);
-  if (absDrift < 3) {
+  if (absDrift < 6) {
     // Dead zone — return to 1.0
     syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
     applyPlaybackRate(syncState.smoothedRate);
     return;
   }
   if (absDrift < 25) {
-    // Rate correction — same formula as Tier 2 in main loop
-    const rateCorrection   = Math.max(-0.005, Math.min(0.005, -drift * 0.0001));
+    // Rate correction — same gentler formula as Tier 2 in main loop
+    const rateCorrection   = Math.max(-0.005, Math.min(0.005, -drift * 0.00005));
     const targetRate       = Math.max(0.995, Math.min(1.005, 1.0 + rateCorrection));
     syncState.smoothedRate = syncState.smoothedRate * 0.8 + targetRate * 0.2;
     applyPlaybackRate(syncState.smoothedRate);
@@ -710,9 +710,9 @@ async function adaptiveSyncLoop() {
 
   if (DEBUG_SYNC) {
     const _a25 = absSmoothed >= 25 || Math.abs(drift) > 40;
-    const _a3  = absSmoothed >= 3  || Math.abs(drift) > 15;
+    const _a6  = absSmoothed >= 6  || Math.abs(drift) > 20;
     const _thr = syncState.ctxThrottleRatio < 0.995;
-    const _decision = !_a3 ? 'idle'
+    const _decision = !_a6 ? 'idle'
       : (!_a25 && !_thr) ? 'rate-fix'
       : (syncState.pendingRestart ? 'restart(pending)' : 'restart(first)');
     _dbg.log(`${((Date.now()-_DBG_START)/1000).toFixed(1)}s [cycle] req | off=${offset.toFixed(1)} exp=${expected.toFixed(3)} act=${actualNow.toFixed(3)} drift=${drift.toFixed(1)} smd=${smoothedDrift.toFixed(1)} dRate=${driftRate.toFixed(2)} rate=${syncState.smoothedRate.toFixed(4)} dec=${_decision} stab=${requestState.stabilityScore} urg=${urgencyState.level|0}`);
@@ -784,9 +784,9 @@ async function adaptiveSyncLoop() {
   // Tier 3: Restart (>25ms or throttled with large drift) — seek to correct position
 
   const absSmoothed25 = absSmoothed >= 25 || Math.abs(drift) > 40;
-  const absSmoothed3  = absSmoothed >= 3  || Math.abs(drift) > 15;
+  const absSmoothed6  = absSmoothed >= 6  || Math.abs(drift) > 20;
 
-  if (!absSmoothed3) {
+  if (!absSmoothed6) {
     // ── Tier 1: Dead zone — drift inaudible ─────────────────────────────────
     syncState.largeDriftCount = 0;
     syncState.pendingRestart  = false;
@@ -795,24 +795,26 @@ async function adaptiveSyncLoop() {
     syncState.smoothedRate    = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
     applyPlaybackRate(syncState.smoothedRate);
 
-  } else if (!absSmoothed25 && !isThrottled) {
-    // ── Tier 2: Rate correction (3-25ms, no throttling) ─────────────────────
-    // Adjust playbackRate to close the gap smoothly over a few seconds.
-    // Inaudible at ±0.3% rate change; closes 10ms gap in ~3s.
+  } else if (!absSmoothed25 && !isThrottled && absSmoothed6) {
+    // ── Tier 2: Rate correction (6-25ms, no throttling) ─────────────────────
+    // Adjust playbackRate to close the gap smoothly.
+    // Dead zone raised to 6ms: ±5ms is measurement noise on desktop, not real drift.
     syncState.largeDriftCount = 0;
     syncState.pendingRestart  = false;
     syncState.stableCount     = 0;
 
-    // Rate proportional to drift: 1ms → 0.01% correction, 20ms → 0.2% correction
-    // Capped at ±0.5% to stay inaudible
-    const rateCorrection = Math.max(-0.005, Math.min(0.005, -smoothedDrift * 0.0001));
+    // Gentler correction: 0.00005 per ms (was 0.0001) — avoids overshooting
+    // At 10ms drift → 0.05% correction → closes 10ms gap in ~20s (inaudible)
+    // At 20ms drift → 0.1% correction → closes 20ms gap in ~20s
+    const rateCorrection = Math.max(-0.005, Math.min(0.005, -smoothedDrift * 0.00005));
     const targetRate     = 1.0 + rateCorrection;
 
-    // Apply driftRate feed-forward: if drift is growing, correct faster
-    const ffCorrection   = Math.max(-0.002, Math.min(0.002, -driftRate * 0.00003));
+    // Feed-forward from driftRate — gentler too
+    const ffCorrection   = Math.max(-0.001, Math.min(0.001, -driftRate * 0.00002));
     const combinedRate   = Math.max(0.995, Math.min(1.005, targetRate + ffCorrection));
 
-    syncState.smoothedRate = syncState.smoothedRate * 0.7 + combinedRate * 0.3;
+    // Slow EMA blend to prevent oscillation
+    syncState.smoothedRate = syncState.smoothedRate * 0.85 + combinedRate * 0.15;
     applyPlaybackRate(syncState.smoothedRate);
 
     if (DEBUG_SYNC) _dbg.event('rate-fix',
