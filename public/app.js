@@ -1132,15 +1132,20 @@ function applyVolume(vol) {
   if (!slider) return;
   // Init gradient
   slider.style.setProperty('--vol', slider.value + '%');
+  let _volDebounce = null;
   slider.addEventListener('input', () => {
     const vol = parseInt(slider.value) / 100;
     slider.style.setProperty('--vol', slider.value + '%');
     document.getElementById('volume-label').textContent = slider.value + '%';
+    // Apply locally immediately so host hears changes in real time
     applyVolume(vol);
-    // Send to all clients via WebSocket
-    if (ws && ws.readyState === WebSocket.OPEN && role === 'host') {
-      ws.send(JSON.stringify({ type: 'set_volume', volume: vol }));
-    }
+    // Send to clients only after user stops moving slider (debounce 300ms)
+    clearTimeout(_volDebounce);
+    _volDebounce = setTimeout(() => {
+      if (ws && ws.readyState === WebSocket.OPEN && role === 'host') {
+        ws.send(JSON.stringify({ type: 'set_volume', volume: vol }));
+      }
+    }, 300);
   });
 })();
 
