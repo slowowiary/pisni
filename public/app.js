@@ -176,8 +176,8 @@ function addSample(srvTime, t0) {
   } else {
     // Один стабільний коефіцієнт 80/20 — передбачувано і достатньо
     const blended = offset * 0.8 + newOffset * 0.2;
-    // Clamp: не більше 20ms зміни за один крок — захист від різких стрибків
-    const step    = Math.max(-20, Math.min(20, blended - offset));
+    // Clamp: не більше 40ms зміни за один крок — достатньо швидко для реального зсуву
+    const step    = Math.max(-40, Math.min(40, blended - offset));
     offset        = offset + step;
   }
 }
@@ -409,8 +409,15 @@ async function adaptiveSyncLoop() {
   syncState.longTermDrift = syncState.longTermDrift +
     (smoothedDrift - syncState.longTermDrift) * 0.02;
 
-  updateStability(drift, requestState.lastDrift);
-  updateUrgency(drift, driftRate);
+  // Urgency decay відбувається завжди — незалежно від якості виміру
+  if (Date.now() - urgencyState.lastSpikeTime > 5000) {
+    urgencyState.level = Math.max(0, urgencyState.level - 5);
+  }
+  // Stability і urgency штрафи — тільки якщо вимір не шумний
+  if (!isNoisy) {
+    updateStability(drift, requestState.lastDrift);
+    updateUrgency(drift, driftRate);
+  }
 
   // Рішення приймаємо за smoothedDrift (згладжений), не за сирим drift
   // Один шумний вимір не змінить smoothedDrift суттєво
