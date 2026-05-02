@@ -811,27 +811,20 @@ function updateScroll() {
   if (!active) return;
   const containerH = lyricsCont.clientHeight;
   const wordTop    = active.offsetTop;
-  const relPos     = wordTop - currentScrollY; // word position in visible area
+  const relPos     = wordTop - currentScrollY; // word Y in visible area
 
-  // Fraction: 0 = top of container, 1 = bottom
-  const fraction = relPos / containerH;
+  // fraction: 0 = top of visible area, 1 = bottom
+  const fraction = Math.max(0, Math.min(1, relPos / containerH));
 
-  // Target: always try to keep active word at ~25% from top (second line area).
-  // The target itself is fixed — what changes is HOW FAST we move toward it.
-  const TARGET_FRACTION = 0.25;
-  const newTarget = Math.max(0, wordTop - containerH * TARGET_FRACTION);
+  // No scroll needed when word is in upper quarter
+  if (fraction < 0.15) return;
 
-  // Speed curve: starts moving when word passes 20% mark,
-  // accelerates strongly as word goes lower.
-  // fraction < 0.20 → no scroll needed
-  // fraction 0.20–0.50 → gentle scroll
-  // fraction 0.50–0.80 → faster
-  // fraction > 0.80 → urgent
-  if (fraction < 0.20) return; // word is already near top, don't scroll
+  // Target: keep word at 25% from top
+  const newTarget = Math.max(0, wordTop - containerH * 0.25);
 
-  // Exponential urgency: small when word is slightly below target, large when far below
-  const excess = fraction - 0.20; // how far past the threshold
-  const urgency = Math.min(1.0, excess * excess * 6); // quadratic, caps at 1.0
+  // Speed curve: urgency = fraction² × 1.2, capped at 1.0
+  // fraction=0.33 → 0.13 (slow), fraction=0.50 → 0.30, fraction=1.0 → 1.0
+  const urgency = Math.min(1.0, fraction * fraction * 1.2);
 
   targetScrollY = targetScrollY + (newTarget - targetScrollY) * urgency;
 }
