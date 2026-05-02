@@ -30,8 +30,14 @@ const _dbg = (() => {
     return `+${s}s`;
   }
 
+  let _clientLabel = 'host'; // updated after role is known
+
+  function setLabel(label) { _clientLabel = label; }
+
   function log(line) {
-    buffer.push(line);
+    // Prefix every line with client label so merged logs are identifiable
+    const tagged = `[${_clientLabel}] ${line}`;
+    buffer.push(tagged);
     if (buffer.length > MAX_ENTRIES) buffer.shift();
   }
 
@@ -154,7 +160,11 @@ const _dbg = (() => {
     document.body.appendChild(panelEl);
   }
 
-  return { log, event, scheduleUiUpdate, initPanel };
+  function getBuffer() {
+    const out = buffer.splice(0); // drain: send and clear
+    return out;
+  }
+  return { log, event, scheduleUiUpdate, initPanel, setLabel, getBuffer };
 })();
 
 
@@ -964,7 +974,11 @@ async function handleMsg(msg) {
       // Не додаємо зразок з joined — RTT WebSocket невідомий, фіктивне 30ms спотворює offset
 
       if (role === 'host') {
-        if (DEBUG_SYNC) { _dbg.event('role', 'host — debug panel'); _dbg.initPanel(); }
+        if (DEBUG_SYNC) {
+          _dbg.setLabel('host');
+          _dbg.event('role', 'host — debug panel');
+          _dbg.initPanel();
+        }
         joinScreen.hidden = true;
         buildSongList();
         songPicker.hidden = false;
@@ -982,7 +996,21 @@ async function handleMsg(msg) {
 
       } else {
         // Клієнт
-        if (DEBUG_SYNC) { _dbg.event('role', 'client — debug panel'); _dbg.initPanel(); }
+        if (DEBUG_SYNC) {
+          // Use short ID: last 4 chars of clientId for readable label
+          const _shortId = getClientId().slice(-4);
+          _dbg.setLabel(`c-${_shortId}`);
+          _dbg.event('role', `client c-${_shortId} — debug panel`);
+          _dbg.initPanel();
+          // Flush logs to host every 5 seconds via WebSocket
+          setInterval(() => {
+            if (!DEBUG_SYNC || role === 'host') return;
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            const lines = _dbg.getBuffer();
+            if (lines.length === 0) return;
+            ws.send(JSON.stringify({ type: 'debug_log', lines }));
+          }, 5000);
+        }
         songPicker.hidden = true; playBtn.hidden = true;
         pauseBtn.hidden = true; syncLabel.hidden = true;
         lyricsCont.hidden = true;
@@ -995,6 +1023,16 @@ async function handleMsg(msg) {
 
     case 'pong':
       break;
+
+    // ── Debug log from client ─────────────────────────────────────────────────
+    case 'debug_log': {
+      if (!DEBUG_SYNC || role !== 'host') break;
+      if (Array.isArray(msg.lines)) {
+        msg.lines.forEach(line => _dbg.log(line));
+        _dbg.scheduleUiUpdate();
+      }
+      break;
+    }
 
     // ── Play ─────────────────────────────────────────────────────────────────
     // FIX: завжди оновлюємо currentSong з msg.song — навіть якщо пісня "та сама"
