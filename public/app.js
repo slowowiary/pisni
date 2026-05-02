@@ -1128,7 +1128,6 @@ async function handleMsg(msg) {
     }
 
     // ── Resume ───────────────────────────────────────────────────────────────
-    // FIX: більше замірів при resume для точної синхронізації після паузи
     case 'resume': {
       startTime        = msg.startTime;
       paused           = false;
@@ -1136,7 +1135,12 @@ async function handleMsg(msg) {
       startAnim(); startScroll(); requestWakeLock();
       setStatus('');
       if (role === 'host') { pauseBtn.textContent = '⏸ Пауза'; }
-      if (role === 'host' || (syncAudioEnabled && audioUnlocked && audioBuffer && !isMuted)) {
+      if (role === 'host') {
+        // Host already did preSync before sending resume — just schedule
+        scheduleAudio();
+        startAdaptiveSyncLoop();
+      } else if (syncAudioEnabled && audioUnlocked && audioBuffer && !isMuted) {
+        // Clients sync offset fresh, parallel pattern like initial play
         await preSync();
         scheduleAudio();
         startAdaptiveSyncLoop();
@@ -1311,9 +1315,16 @@ playBtn?.addEventListener('click', async () => {
   ws.send(JSON.stringify({ type: 'play', song }));
 });
 
-pauseBtn?.addEventListener('click', () => {
+pauseBtn?.addEventListener('click', async () => {
   if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host' || !playing) return;
-  ws.send(JSON.stringify({ type: paused ? 'resume' : 'pause', song: currentSong }));
+  if (paused) {
+    // Pre-sync offset before resume — same pattern as initial play
+    // This ensures host's offset is fresh when scheduleAudio runs
+    await preSync();
+    ws.send(JSON.stringify({ type: 'resume', song: currentSong }));
+  } else {
+    ws.send(JSON.stringify({ type: 'pause', song: currentSong }));
+  }
 });
 
 syncCheck?.addEventListener('change', () => {
