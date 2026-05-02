@@ -170,25 +170,15 @@ function addSample(srvTime, t0) {
   let ws = 0, os = 0;
   for (const s of use) { const w = minRtt / s.rtt; ws += w; os += s.off * w; }
   const newOffset = os / ws;
-  // EMA змішування offset — новий вимір вливається поступово
-  // Якщо clockSamples тільки що скинули (preSync) — перший замір береться повністю
-  // Якщо є попередній offset і стрибок великий — дуже повільне вливання (90/10)
-  // Якщо стрибок помірний — стандартне (80/20)
   if (clockSamples.length <= 1) {
-    // Перший замір після скидання — довіряємо повністю
+    // Перший замір після скидання — довіряємо повністю (offset ще не має сенсу)
     offset = newOffset;
   } else {
-    const delta = Math.abs(newOffset - offset);
-    if (delta > 30) {
-      // Різкий стрибок >30ms — дуже повільно (90% старий, 10% новий)
-      offset = offset * 0.9 + newOffset * 0.1;
-    } else if (delta > 10) {
-      // Помірний стрибок — стандартно (80/20)
-      offset = offset * 0.8 + newOffset * 0.2;
-    } else {
-      // Малий стрибок — довіряємо більше (60/40)
-      offset = offset * 0.6 + newOffset * 0.4;
-    }
+    // Один стабільний коефіцієнт 80/20 — передбачувано і достатньо
+    const blended = offset * 0.8 + newOffset * 0.2;
+    // Clamp: не більше 20ms зміни за один крок — захист від різких стрибків
+    const step    = Math.max(-20, Math.min(20, blended - offset));
+    offset        = offset + step;
   }
 }
 
@@ -392,21 +382,20 @@ async function adaptiveSyncLoop() {
   const actualNow = getActualPos();
   if (actualNow === null) { scheduleNext(); return; }
 
-  // Захист від стрибка expected між циклами
-  // Якщо expected різко змінився (>40ms від попереднього) — пропускаємо цикл
-  // Це означає що offset щойно "стрибнув" — чекаємо поки EMA його згладить
-  const prevExp = syncState.lastExpected ?? expected;
-  const expJump = Math.abs((expected - prevExp) * 1000);
-  syncState.lastExpected = expected;
-  if (expJump > 40 && syncState.driftHistory.length > 0) {
-    scheduleNext(); return; // пропускаємо один цикл
-  }
-
   const drift    = (actualNow - expected) * 1000;
   const absDrift = Math.abs(drift);
 
-  syncState.driftHistory.push({ drift, timestamp: Date.now() });
-  if (syncState.driftHistory.length > 8) syncState.driftHistory.shift();
+  // Захист від шумного виміру: якщо expected різко стрибнув або drift аномальний
+  // — не додаємо в driftHistory, але продовжуємо цикл (не пропускаємо)
+  const prevExp    = syncState.lastExpected ?? expected;
+  const expJump    = Math.abs((expected - prevExp) * 1000);
+  syncState.lastExpected = expected;
+  const isNoisy    = (expJump > 40 && syncState.driftHistory.length > 0)
+                  || (absDrift > 80 && syncState.stableCount > 3);
+  if (!isNoisy) {
+    syncState.driftHistory.push({ drift, timestamp: Date.now() });
+    if (syncState.driftHistory.length > 8) syncState.driftHistory.shift();
+  }
 
   const smoothedDrift = _weightedAverage(syncState.driftHistory.map(h => h.drift));
   const history       = syncState.driftHistory;
