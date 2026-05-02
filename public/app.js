@@ -247,37 +247,68 @@ function unlockAudio() {
 
 // Завантажує MP3. Якщо вже завантажений — повертає кеш.
 // FIX: скидає audioBuffer якщо пісня змінилась
+// Singleton buffer loader — only one load at a time.
+// If same song requested while loading — returns same promise (no duplicate fetch).
+// If different song requested — cancels previous and starts new.
+let _bufferPromise = null;
+let _bufferSong    = null;
+let _bufferAbort   = null;
+
 async function ensureBuffer(song) {
-  // Вже є правильний буфер
+  // Already have correct buffer
   if (audioBuffer && currentSong === song) return audioBuffer;
-  // Якщо буфер від іншої пісні — скидаємо
-  if (audioBuffer && currentSong !== song) audioBuffer = null;
-  // If already loading a different song — cancel it by changing loadingSong
-  // The old load will see loadingSong !== its song and discard the result
-  loadingSong = song;
+
+  // Same song already loading — wait for it
+  if (_bufferSong === song && _bufferPromise) return _bufferPromise;
+
+  // Different song — cancel previous load
+  if (_bufferAbort) { _bufferAbort.abort(); _bufferAbort = null; }
+  audioBuffer  = null;
+  _bufferSong  = song;
+  loadingSong  = song;
+
   initAudio();
-  try {
-    const _bufCtrl = new AbortController();
-    const _bufTimer = setTimeout(() => _bufCtrl.abort(), 15000);
-    const res = await fetch('/songs/' + song + '/' + song + '.mp3',
-      { signal: _bufCtrl.signal }).finally(() => clearTimeout(_bufTimer));
-    if (!res.ok) throw new Error('MP3 not found: ' + song);
-    const arr = await res.arrayBuffer();
-    // If a newer load started for a different song — discard this result silently
-    if (loadingSong !== song) return null;
-    audioBuffer = await new Promise((ok, fail) => audioCtx.decodeAudioData(arr, ok, fail));
-    currentSong = song; // ensure currentSong matches what we loaded
-    loadingSong = null;
-    return audioBuffer;
-  } catch (e) {
-    if (loadingSong === song) { loadingSong = null; audioBuffer = null; }
-    throw e;
-  }
+  const ctrl = new AbortController();
+  _bufferAbort = ctrl;
+
+  _bufferPromise = (async () => {
+    try {
+      const timer = setTimeout(() => ctrl.abort(), 15000);
+      const res = await fetch('/songs/' + song + '/' + song + '.mp3',
+        { signal: ctrl.signal }).finally(() => clearTimeout(timer));
+      if (!res.ok) throw new Error('MP3 not found: ' + song);
+      const arr = await res.arrayBuffer();
+      // Cancelled — another song took over
+      if (_bufferSong !== song) return null;
+      const buf = await new Promise((ok, fail) =>
+        audioCtx.decodeAudioData(arr.slice(0), ok, fail));
+      if (_bufferSong !== song) return null;
+      audioBuffer   = buf;
+      currentSong   = song;
+      loadingSong   = null;
+      _bufferPromise = null;
+      _bufferAbort   = null;
+      return audioBuffer;
+    } catch (e) {
+      if (_bufferSong === song) {
+        _bufferPromise = null;
+        _bufferAbort   = null;
+        loadingSong    = null;
+      }
+      throw e;
+    }
+  })();
+
+  return _bufferPromise;
 }
 
 function clearBuffer() {
   audioBuffer = null;
   loadingSong = null;
+  // Cancel any in-flight load
+  if (_bufferAbort) { _bufferAbort.abort(); _bufferAbort = null; }
+  _bufferPromise = null;
+  _bufferSong    = null;
 }
 
 // =============================================================================
@@ -1066,8 +1097,7 @@ function buildSongList() {
 function selectSong(song) {
   if (song === currentSong) return;
   currentSong = song;
-  loadingSong = song; // cancel any in-flight buffer load for previous song
-  clearBuffer();
+  clearBuffer(); // cancels in-flight load via AbortController
   highlightSong(song, false);
   loadLyrics(song);
   if (role === 'host') {
@@ -1574,9 +1604,10 @@ async function doPlay(song) {
       try {
         // Load buffer and sync offset in parallel
         const [buf] = await Promise.all([ensureBuffer(song), preSync()]);
-        if (!buf) {
-          // ensureBuffer was superseded by a newer load — use whatever is current
-          if (!audioBuffer) { stopNode(); clearBuffer(); return; }
+        if (!buf && !audioBuffer) {
+          // Buffer was cancelled — try once more with current song
+          try { await ensureBuffer(currentSong); } catch {}
+          if (!audioBuffer) { stopNode(); return; }
         }
         setStatus('');
       } catch (e) {
