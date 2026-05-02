@@ -310,7 +310,10 @@ async function scheduleAudio() {
   syncState.ctxAnchorWall    = Date.now();
   syncState.ctxAnchorCtx     = audioCtx.currentTime;
   syncState.ctxThrottleRatio = 1.0;
-  syncState.ctxSamples       = [{ wall: Date.now(), ctx: audioCtx.currentTime }];
+  // Keep ctxSamples rolling — don't reset on restart so freeze detection stays active
+  // But push current point as the new anchor for the long-term ratio
+  if (!syncState.ctxSamples) syncState.ctxSamples = [];
+  syncState.ctxSamples.push({ wall: Date.now(), ctx: audioCtx.currentTime });
   if (DEBUG_SYNC) _dbg.event('scheduleAudio', `off=${off.toFixed(3)}s when=${when.toFixed(3)} startTime=${startTime} offset=${offset.toFixed(1)}ms`);
   sourceNode = src;
   src.onended = () => {
@@ -731,8 +734,10 @@ async function adaptiveSyncLoop() {
   if (nowCtx !== null && syncState.ctxAnchorWall !== null) {
     // Push new sample to rolling window
     syncState.ctxSamples.push({ wall: nowWall, ctx: nowCtx });
-    // Keep only samples from last 8 seconds
-    const cutoff = nowWall - 8000;
+    // Keep only samples from last 4 seconds — shorter window catches brief freezes better
+    // 130ms freeze in 4s window: ratio = (4-0.13)/4 = 0.968 < 0.970 ← catches it
+    // 130ms freeze in 8s window: ratio = (8-0.13)/8 = 0.984 > 0.980 ← missed
+    const cutoff = nowWall - 4000;
     syncState.ctxSamples = syncState.ctxSamples.filter(s => s.wall >= cutoff);
 
     // Long-term ratio (from scheduleAudio anchor)
@@ -749,7 +754,7 @@ async function adaptiveSyncLoop() {
       const oldest  = syncState.ctxSamples[0];
       const wallShort = (nowWall - oldest.wall) / 1000;
       const ctxShort  = nowCtx - oldest.ctx;
-      if (wallShort >= 1.5) { // Need at least 1.5s
+      if (wallShort >= 1.0) { // Need at least 1s
         shortRatio = ctxShort / wallShort;
       }
     }
@@ -763,8 +768,12 @@ async function adaptiveSyncLoop() {
       }
     }
 
+    // Ignore throttle in first 3s after scheduleAudio — ctx starts slow after creation
+    const timeSinceSchedule = syncState.ctxAnchorWall ? (nowWall - syncState.ctxAnchorWall) : 0;
+    const throttleReady = timeSinceSchedule > 3000;
     // Throttled if EITHER long-term OR short-term ratio is bad
-    var isThrottled = syncState.ctxThrottleRatio < 0.995 || shortRatio < 0.980;
+    // 0.970 threshold: catches 130ms freeze in 4s window (ratio=0.968)
+    var isThrottled = throttleReady && (syncState.ctxThrottleRatio < 0.995 || shortRatio < 0.970);
   } else {
     var isThrottled = false;
   }
