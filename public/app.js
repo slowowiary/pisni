@@ -694,10 +694,10 @@ async function adaptiveSyncLoop() {
     const now        = Date.now();
     const canRestart = (now - syncState.lastRestartTime) > 3000;
 
-    // In first 15s of playback, skip confirmation — initial offset error
-    // needs immediate correction. After 15s, require 2 consecutive measurements.
+    // In first 20s of playback, skip confirmation — initial offset error
+    // needs immediate correction. After 20s, require 2 consecutive measurements.
     const playingForMs     = startTime !== null ? (serverNow() - startTime) : 99999;
-    const skipConfirmation = playingForMs < 15000;
+    const skipConfirmation = playingForMs < 20000;
 
     if (!syncState.pendingRestart && !skipConfirmation) {
       // Normal mode: set flag, verify next cycle
@@ -1256,7 +1256,8 @@ async function doPlay(song) {
   resetScroll(); setStatus(''); startAnim(); startScroll();
 
   if (role === 'host') {
-    await preSync();
+    // preSync already done in playBtn handler before ws.send('play')
+    // Doing it again here adds 120ms delay and causes host to start late
     scheduleAudio();
     startAdaptiveSyncLoop();
 
