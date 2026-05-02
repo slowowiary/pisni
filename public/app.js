@@ -662,80 +662,58 @@ async function adaptiveSyncLoop() {
 
   if (DEBUG_SYNC) {
     const _decision = absSmoothed < 15 ? 'idle'
-      : absSmoothed <= 40 ? 'rate'
-      : (syncState.pendingRestart ? 'large(pending)' : 'large(first)');
+      : (syncState.pendingRestart ? 'restart(pending)' : 'restart(first)');
     _dbg.log(`${((Date.now()-_DBG_START)/1000).toFixed(1)}s [cycle] req | off=${offset.toFixed(1)} exp=${expected.toFixed(3)} act=${actualNow.toFixed(3)} drift=${drift.toFixed(1)} smd=${smoothedDrift.toFixed(1)} dRate=${driftRate.toFixed(2)} rate=${syncState.smoothedRate.toFixed(4)} dec=${_decision} stab=${requestState.stabilityScore} urg=${urgencyState.level|0}`);
     _dbg.scheduleUiUpdate();
   }
 
   if (absSmoothed < 15) {
-    // Мертва зона — дуже повільно до 1.0
+    // Dead zone — drift inaudible, slowly return rate to 1.0
     syncState.largeDriftCount = 0;
     syncState.pendingRestart  = false;
-    syncState.lastSmdSign     = 0; // reset sign tracking in dead zone
+    syncState.lastSmdSign     = 0;
     syncState.stableCount     = Math.min(syncState.stableCount + 1, 20);
     syncState.smoothedRate    = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
     applyPlaybackRate(syncState.smoothedRate);
 
-  } else if (absSmoothed <= 40) {
-    // Середній drift — слабка корекція через driftRate
-    syncState.largeDriftCount = 0;
-    syncState.pendingRestart  = false;
-    const curSign  = smoothedDrift > 0 ? 1 : -1;
-    const signFlip = syncState.lastSmdSign !== 0 && curSign !== syncState.lastSmdSign;
-    syncState.lastSmdSign = curSign;
-    if (signFlip) {
-      // smoothedDrift crossed zero — skip rate change this cycle to avoid oscillation.
-      // Just nudge very slowly back to 1.0 and wait for stable direction next cycle.
-      syncState.stableCount = 0;
-      syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.02;
-      applyPlaybackRate(syncState.smoothedRate);
-    } else {
-      // Stable direction — apply correction
-      // Інерція: якщо система довго була стабільна → ще повільніша реакція
-      const inertia = syncState.stableCount > 5 ? 0.04 : 0.08;
-      syncState.stableCount = 0;
-      const targetRate = calcTargetRate(driftRate, smoothedDrift);
-      syncState.smoothedRate = syncState.smoothedRate +
-        (targetRate - syncState.smoothedRate) * inertia;
-      applyPlaybackRate(syncState.smoothedRate);
-    }
-
   } else {
-    // Великий drift — потрібне підтвердження перед restart
+    // Audible drift (≥15ms) — restart immediately to correct position,
+    // then set playbackRate to compensate systematic drift going forward.
+    // Rate-only correction (old middle zone) took 4+ minutes to close 27ms — too slow.
+    // Restart is inaudible when position is accurate; cooldown prevents restart loops.
     syncState.stableCount = 0;
-    syncState.largeDriftCount += 1;
+    syncState.lastSmdSign = 0;
+
+    const now        = Date.now();
+    const canRestart = (now - syncState.lastRestartTime) > 3000;
 
     if (!syncState.pendingRestart) {
-      // Перший раз бачимо великий drift — ставимо флаг і чекаємо наступного циклу
-      syncState.pendingRestart = true;
-      syncState.smoothedRate   = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
+      // First time seeing this drift — set flag, verify next cycle
+      // (guards against single noisy measurement causing restart)
+      syncState.pendingRestart  = true;
+      syncState.largeDriftCount = 1;
+      syncState.smoothedRate    = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
       applyPlaybackRate(syncState.smoothedRate);
-    } else if (syncState.largeDriftCount >= 2 && syncState.driftHistory.length >= 4) {
-      // Підтверджено мінімум двома вимірами поспіль + достатньо даних → restart
-      const now        = Date.now();
-      const canRestart = (now - syncState.lastRestartTime) > 3000;
-      if (canRestart) {
-        syncState.lastRestartTime = now;
-        syncState.skipNext        = true;
-        syncState.largeDriftCount = 0;
-        syncState.pendingRestart  = false;
-        urgencyState.level          = Math.min(100, urgencyState.level + 40);
-        requestState.stabilityScore = Math.max(0, requestState.stabilityScore - 20);
-        syncState.smoothedRate = 1.0;
-        if (DEBUG_SYNC) _dbg.event('RESTART', `smd=${smoothedDrift.toFixed(1)}ms drift=${drift.toFixed(1)}ms offset=${offset.toFixed(1)}ms`);
-        // preSync before restart — refresh offset so new start position is accurate
-        // Without this, restart uses stale offset and lands 50-100ms off again
-        await preSync();
-        scheduleAudio();
-        applyPlaybackRate(1.0);
-      } else {
-        // Cooldown — чекаємо
-        syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
-        applyPlaybackRate(syncState.smoothedRate);
-      }
+
+    } else if (canRestart) {
+      // Confirmed by two consecutive cycles — restart now
+      syncState.lastRestartTime = now;
+      syncState.skipNext        = true;
+      syncState.largeDriftCount = 0;
+      syncState.pendingRestart  = false;
+      urgencyState.level          = Math.min(100, urgencyState.level + 20);
+      requestState.stabilityScore = Math.max(0, requestState.stabilityScore - 10);
+      if (DEBUG_SYNC) _dbg.event('RESTART', `smd=${smoothedDrift.toFixed(1)}ms drift=${drift.toFixed(1)}ms offset=${offset.toFixed(1)}ms`);
+      // Fresh offset before restart — stale offset causes landing 50-100ms off
+      await preSync();
+      scheduleAudio();
+      // Set playbackRate based on driftRate to prevent same drift from accumulating again
+      const targetRate       = calcTargetRate(driftRate, smoothedDrift);
+      syncState.smoothedRate = Math.max(0.997, Math.min(1.003, targetRate));
+      applyPlaybackRate(syncState.smoothedRate);
+
     } else {
-      // largeDriftCount = 1, pendingRestart = true — чекаємо ще один цикл
+      // Cooldown active — wait, nudge slowly toward 1.0
       syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
       applyPlaybackRate(syncState.smoothedRate);
     }
