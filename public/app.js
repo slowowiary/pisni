@@ -1347,13 +1347,17 @@ function startAnim() {
   (function tick() {
     if (!playing || paused || startTime === null) return;
     const t = (serverNow() - startTime) / 1000;
+    const PRE = 0.5; // seconds before timing to start glow
     for (let i = 0; i < wordSpans.length; i++) {
       const w = lyrics[i];
       if (!w) continue;
-      const active = t >= w.start && t < w.end;
-      const done   = t >= w.end && !active;
-      wordSpans[i].classList.toggle('active', active);
-      wordSpans[i].classList.toggle('done',   done);
+      const active    = t >= w.start && t < w.end;
+      const done      = t >= w.end && !active;
+      // pre-active: starts PRE seconds before word timing, ends when active begins
+      const preActive = !active && !done && t >= (w.start - PRE) && t < w.start;
+      wordSpans[i].classList.toggle('active',     active);
+      wordSpans[i].classList.toggle('pre-active', preActive);
+      wordSpans[i].classList.toggle('done',       done);
     }
     updateScroll();
     animFrame = requestAnimationFrame(tick);
