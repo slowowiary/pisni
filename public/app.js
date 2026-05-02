@@ -169,7 +169,27 @@ function addSample(srvTime, t0) {
   const minRtt  = use[0].rtt;
   let ws = 0, os = 0;
   for (const s of use) { const w = minRtt / s.rtt; ws += w; os += s.off * w; }
-  offset = os / ws;
+  const newOffset = os / ws;
+  // EMA змішування offset — новий вимір вливається поступово
+  // Якщо clockSamples тільки що скинули (preSync) — перший замір береться повністю
+  // Якщо є попередній offset і стрибок великий — дуже повільне вливання (90/10)
+  // Якщо стрибок помірний — стандартне (80/20)
+  if (clockSamples.length <= 1) {
+    // Перший замір після скидання — довіряємо повністю
+    offset = newOffset;
+  } else {
+    const delta = Math.abs(newOffset - offset);
+    if (delta > 30) {
+      // Різкий стрибок >30ms — дуже повільно (90% старий, 10% новий)
+      offset = offset * 0.9 + newOffset * 0.1;
+    } else if (delta > 10) {
+      // Помірний стрибок — стандартно (80/20)
+      offset = offset * 0.8 + newOffset * 0.2;
+    } else {
+      // Малий стрибок — довіряємо більше (60/40)
+      offset = offset * 0.6 + newOffset * 0.4;
+    }
+  }
 }
 
 // Початкова синхронізація при вході
@@ -183,10 +203,11 @@ async function syncOnEntry(id) {
 }
 
 // Точна синхронізація перед стартом аудіо
-// Очищає старі зразки щоб старий RTT не впливав на offset
 // 4 заміри з паузою 30ms — достатньо точно, вкладається в 3с запас startTime
+// Скидаємо clockSamples тільки якщо музика не грає —
+// під час відтворення скидання дасть різкий стрибок offset → хибний drift
 async function preSync() {
-  clockSamples = []; // скидаємо старі зразки — свіжі точніші
+  if (!playing) clockSamples = []; // скидаємо тільки на старті, не під час гри
   for (let i = 0; i < 4; i++) {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
@@ -213,11 +234,15 @@ function getActualPos() {
 const SAFETY_OFFSET = 0.03; // 30ms — достатньо для інтернету
 
 const syncState = {
-  driftHistory:    [],
-  smoothedRate:    1.0,
-  skipNext:        false,
-  lastRestartTime: 0,
-  longTermDrift:   0,
+  driftHistory:       [],
+  smoothedRate:       1.0,
+  skipNext:           false,
+  lastRestartTime:    0,
+  longTermDrift:      0,
+  largeDriftCount:    0,     // скільки разів поспіль drift > 40ms
+  pendingRestart:     false, // перший великий drift → чекаємо підтвердження
+  stableCount:        0,     // скільки разів поспіль drift < 15ms (інерція)
+  lastExpected:       null,  // попереднє expected — захист від стрибка offset
 };
 
 const requestState = {
@@ -367,6 +392,16 @@ async function adaptiveSyncLoop() {
   const actualNow = getActualPos();
   if (actualNow === null) { scheduleNext(); return; }
 
+  // Захист від стрибка expected між циклами
+  // Якщо expected різко змінився (>40ms від попереднього) — пропускаємо цикл
+  // Це означає що offset щойно "стрибнув" — чекаємо поки EMA його згладить
+  const prevExp = syncState.lastExpected ?? expected;
+  const expJump = Math.abs((expected - prevExp) * 1000);
+  syncState.lastExpected = expected;
+  if (expJump > 40 && syncState.driftHistory.length > 0) {
+    scheduleNext(); return; // пропускаємо один цикл
+  }
+
   const drift    = (actualNow - expected) * 1000;
   const absDrift = Math.abs(drift);
 
@@ -388,34 +423,61 @@ async function adaptiveSyncLoop() {
   updateStability(drift, requestState.lastDrift);
   updateUrgency(drift, driftRate);
 
-  if (absDrift < 15) {
-    // Мертва зона — drift непомітний, дуже повільно повертаємось до 1.0
-    // lerp 0.05: зміна за один цикл max ~0.25% — нечутно
-    syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
+  // Рішення приймаємо за smoothedDrift (згладжений), не за сирим drift
+  // Один шумний вимір не змінить smoothedDrift суттєво
+  const absSmoothed = Math.abs(smoothedDrift);
+
+  if (absSmoothed < 15) {
+    // Мертва зона — дуже повільно до 1.0
+    syncState.largeDriftCount = 0;
+    syncState.pendingRestart  = false;
+    syncState.stableCount     = Math.min(syncState.stableCount + 1, 20);
+    syncState.smoothedRate    = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
     applyPlaybackRate(syncState.smoothedRate);
 
-  } else if (absDrift <= 40) {
-    // Середній drift — тільки driftRate визначає напрямок і силу корекції
-    // Система інертна: lerp 0.08 означає що новий targetRate впливає повільно
+  } else if (absSmoothed <= 40) {
+    // Середній drift — слабка корекція через driftRate
+    // Інерція: якщо система довго була стабільна → ще повільніша реакція
+    syncState.largeDriftCount = 0;
+    syncState.pendingRestart  = false;
+    const inertia    = syncState.stableCount > 5 ? 0.04 : 0.08;
+    syncState.stableCount = 0;
     const targetRate = calcTargetRate(driftRate);
     syncState.smoothedRate = syncState.smoothedRate +
-      (targetRate - syncState.smoothedRate) * 0.08;
+      (targetRate - syncState.smoothedRate) * inertia;
     applyPlaybackRate(syncState.smoothedRate);
 
   } else {
-    // Великий drift — тільки restart, скидаємо rate до 1.0
-    const now        = Date.now();
-    const canRestart = (now - syncState.lastRestartTime) > 3000;
-    if (canRestart) {
-      syncState.lastRestartTime = now;
-      syncState.skipNext        = true;
-      urgencyState.level          = Math.min(100, urgencyState.level + 40);
-      requestState.stabilityScore = Math.max(0, requestState.stabilityScore - 20);
-      syncState.smoothedRate = 1.0; // після restart — чистий старт без rate корекції
-      scheduleAudio();
-      applyPlaybackRate(1.0);
+    // Великий drift — потрібне підтвердження перед restart
+    syncState.stableCount = 0;
+    syncState.largeDriftCount += 1;
+
+    if (!syncState.pendingRestart) {
+      // Перший раз бачимо великий drift — ставимо флаг і чекаємо наступного циклу
+      syncState.pendingRestart = true;
+      syncState.smoothedRate   = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
+      applyPlaybackRate(syncState.smoothedRate);
+    } else if (syncState.largeDriftCount >= 2) {
+      // Підтверджено мінімум двома вимірами поспіль → restart
+      const now        = Date.now();
+      const canRestart = (now - syncState.lastRestartTime) > 3000;
+      if (canRestart) {
+        syncState.lastRestartTime = now;
+        syncState.skipNext        = true;
+        syncState.largeDriftCount = 0;
+        syncState.pendingRestart  = false;
+        urgencyState.level          = Math.min(100, urgencyState.level + 40);
+        requestState.stabilityScore = Math.max(0, requestState.stabilityScore - 20);
+        syncState.smoothedRate = 1.0;
+        scheduleAudio();
+        applyPlaybackRate(1.0);
+      } else {
+        // Cooldown — чекаємо
+        syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
+        applyPlaybackRate(syncState.smoothedRate);
+      }
     } else {
-      // Cooldown активний — чекаємо, тільки слабке наближення до 1.0
+      // largeDriftCount = 1, pendingRestart = true — чекаємо ще один цикл
       syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
       applyPlaybackRate(syncState.smoothedRate);
     }
