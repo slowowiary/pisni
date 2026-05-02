@@ -225,36 +225,27 @@
       font-weight: 400;
       padding: 0 2px;
       position: relative;
-      /* Біла обводка 1.5px */
-      text-shadow:
-         1px  0    0 #fff,
-        -1px  0    0 #fff,
-         0      1px 0 #fff,
-         0     -1px 0 #fff,
-         0.7px  0.7px 0 #fff,
-        -0.7px  0.7px 0 #fff,
-         0.7px -0.7px 0 #fff,
-        -0.7px -0.7px 0 #fff;
-      transition: color 0.4s ease, text-shadow 1.2s ease;
+      text-shadow: none;
+      transition: color 0.4s ease, text-shadow 1.2s ease, box-shadow 1.2s ease;
     }
     .word::before { content: attr(data-word); display: block; font-weight: 700; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
-    .word.done { color: #bbb; }
+    .word.done { color: #bbb; box-shadow: none; text-shadow: none; }
+
+    /* Верхня і нижня лінії через box-shadow (тільки top+bottom) */
     .word.pre-active {
+      box-shadow:
+        0 -2px 0 0 rgba(220, 0, 0, 0.50),
+        0  2px 0 0 rgba(220, 0, 0, 0.50);
       text-shadow:
-         1px  0    0 #fff,
-        -1px  0    0 #fff,
-         0      1px 0 #fff,
-         0     -1px 0 #fff,
-         0.7px  0.7px 0 #fff,
-        -0.7px  0.7px 0 #fff,
-         0.7px -0.7px 0 #fff,
-        -0.7px -0.7px 0 #fff,
-        0 0 14px rgba(255, 0, 0, 0.70),
-        0 0 32px rgba(255, 0, 0, 0.45),
-        0 0 55px rgba(255, 0, 0, 0.22);
+        0 0 18px rgba(255, 0, 0, 0.35),
+        0 0 40px rgba(255, 0, 0, 0.15);
     }
     .word.active {
+      box-shadow:
+        0 -2px 0 0 rgba(200, 0, 0, 0.90),
+        0  2px 0 0 rgba(200, 0, 0, 0.90);
       text-shadow:
+        /* біла обводка букви */
          1px  0    0 #fff,
         -1px  0    0 #fff,
          0      1px 0 #fff,
@@ -263,11 +254,10 @@
         -0.7px  0.7px 0 #fff,
          0.7px -0.7px 0 #fff,
         -0.7px -0.7px 0 #fff,
-        0 0 10px rgba(255, 0, 0, 0.95),
-        0 0 22px rgba(255, 0, 0, 0.75),
-        0 0 45px rgba(255, 0, 0, 0.50),
-        0 0 75px rgba(255, 0, 0, 0.28),
-        0 0 110px rgba(255, 0, 0, 0.12);
+        /* червоне сяйво */
+        0 0 10px rgba(255, 0, 0, 0.80),
+        0 0 24px rgba(255, 0, 0, 0.50),
+        0 0 50px rgba(255, 0, 0, 0.25);
     }
 
     /* ── Список пісень ──────────────────────────────────────── */
