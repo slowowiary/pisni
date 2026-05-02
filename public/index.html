@@ -222,49 +222,49 @@
       font-weight: 400;
       padding: 0 2px;
       position: relative;
-      /* Біла обводка — 3px (вдвічі грубша) */
+      /* Біла обводка 1.5px */
       text-shadow:
-         3px  0    0 #fff,
-        -3px  0    0 #fff,
-         0      3px 0 #fff,
-         0     -3px 0 #fff,
-         2.1px  2.1px 0 #fff,
-        -2.1px  2.1px 0 #fff,
-         2.1px -2.1px 0 #fff,
-        -2.1px -2.1px 0 #fff;
+         1px  0    0 #333,
+        -1px  0    0 #333,
+         0      1px 0 #333,
+         0     -1px 0 #333,
+         0.7px  0.7px 0 #333,
+        -0.7px  0.7px 0 #333,
+         0.7px -0.7px 0 #333,
+        -0.7px -0.7px 0 #333;
       transition: color 0.4s ease, text-shadow 1.2s ease;
     }
     .word::before { content: attr(data-word); display: block; font-weight: 700; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
     .word.done { color: #888; }
     .word.pre-active {
       text-shadow:
-         3px  0    0 #fff,
-        -3px  0    0 #fff,
-         0      3px 0 #fff,
-         0     -3px 0 #fff,
-         2.1px  2.1px 0 #fff,
-        -2.1px  2.1px 0 #fff,
-         2.1px -2.1px 0 #fff,
-        -2.1px -2.1px 0 #fff,
-        0 0 14px rgba(220, 20, 20, 0.70),
-        0 0 32px rgba(220, 20, 20, 0.45),
-        0 0 55px rgba(220, 20, 20, 0.22);
+         1px  0    0 #333,
+        -1px  0    0 #333,
+         0      1px 0 #333,
+         0     -1px 0 #333,
+         0.7px  0.7px 0 #333,
+        -0.7px  0.7px 0 #333,
+         0.7px -0.7px 0 #333,
+        -0.7px -0.7px 0 #333,
+        0 0 14px rgba(255, 0, 0, 0.70),
+        0 0 32px rgba(255, 0, 0, 0.45),
+        0 0 55px rgba(255, 0, 0, 0.22);
     }
     .word.active {
       text-shadow:
-         3px  0    0 #fff,
-        -3px  0    0 #fff,
-         0      3px 0 #fff,
-         0     -3px 0 #fff,
-         2.1px  2.1px 0 #fff,
-        -2.1px  2.1px 0 #fff,
-         2.1px -2.1px 0 #fff,
-        -2.1px -2.1px 0 #fff,
-        0 0 10px rgba(210, 0, 0, 0.95),
-        0 0 22px rgba(210, 0, 0, 0.75),
-        0 0 45px rgba(210, 0, 0, 0.50),
-        0 0 75px rgba(210, 0, 0, 0.28),
-        0 0 110px rgba(210, 0, 0, 0.12);
+         1px  0    0 #333,
+        -1px  0    0 #333,
+         0      1px 0 #333,
+         0     -1px 0 #333,
+         0.7px  0.7px 0 #333,
+        -0.7px  0.7px 0 #333,
+         0.7px -0.7px 0 #333,
+        -0.7px -0.7px 0 #333,
+        0 0 10px rgba(255, 0, 0, 0.95),
+        0 0 22px rgba(255, 0, 0, 0.75),
+        0 0 45px rgba(255, 0, 0, 0.50),
+        0 0 75px rgba(255, 0, 0, 0.28),
+        0 0 110px rgba(255, 0, 0, 0.12);
     }
 
     /* ── Список пісень ──────────────────────────────────────── */
