@@ -203,18 +203,17 @@
     }
     .word::before { content: attr(data-word); display: block; font-weight: 700; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
     .word.done { color: #888; text-shadow: none; }
-    /* за 1s до таймінгу — слабке світіння */
     .word.pre-active {
       text-shadow:
-        0 0 8px rgba(80, 190, 255, 0.45),
-        0 0 16px rgba(80, 190, 255, 0.25);
+        0 0 10px rgba(255, 60, 60, 0.40),
+        0 0 22px rgba(255, 60, 60, 0.20);
     }
-    /* активне слово — яскраве світіння навколо букв */
     .word.active {
       text-shadow:
-        0 0 6px rgba(80, 190, 255, 0.70),
-        0 0 14px rgba(80, 190, 255, 0.45),
-        0 0 24px rgba(80, 190, 255, 0.20);
+        0 0 8px rgba(255, 60, 60, 0.75),
+        0 0 18px rgba(255, 60, 60, 0.50),
+        0 0 35px rgba(255, 60, 60, 0.25),
+        0 0 55px rgba(255, 60, 60, 0.10);
     }
 
     /* ── Список пісень ──────────────────────────────────────── */
