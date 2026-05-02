@@ -173,11 +173,25 @@ function addSample(srvTime, t0) {
 
 // Початкова синхронізація при вході
 async function syncOnEntry(id) {
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 3; i++) {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${id}/time`).catch(() => null);
     if (res?.ok) addSample((await res.json()).serverTime, t0);
-    if (i < 7) await new Promise(r => setTimeout(r, 20));
+    if (i < 2) await new Promise(r => setTimeout(r, 50));
+  }
+}
+
+// Легка синхронізація перед стартом аудіо — 2 заміри, 50ms між ними
+// Уточнює offset безпосередньо перед scheduleAudio() щоб старт був точним
+async function preSync() {
+  for (let i = 0; i < 2; i++) {
+    const t0  = Date.now();
+    const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
+    if (res?.ok) {
+      addSample((await res.json()).serverTime, t0);
+      requestState.lastRequestTime = Date.now();
+    }
+    if (i < 1) await new Promise(r => setTimeout(r, 50));
   }
 }
 
@@ -548,13 +562,13 @@ function updateSpeakerUI() {
 }
 
 if (headerToggle) {
-  headerToggle.addEventListener('click', () => {
+  headerToggle.addEventListener('click', async () => {
     isMuted = !isMuted;
     if (gainNode) gainNode.gain.value = isMuted ? 0 : 1;
     updateSpeakerUI();
     // Якщо вмикаємо звук під час відтворення — синхронізуємось
     if (!isMuted && syncAudioEnabled && audioUnlocked && playing && !paused && startTime !== null) {
-      scheduleAudio(); startAdaptiveSyncLoop();
+      await preSync(); scheduleAudio(); startAdaptiveSyncLoop();
     } else if (isMuted) {
       stopNode();
     }
@@ -755,6 +769,7 @@ async function handleMsg(msg) {
       setStatus('');
       if (role === 'host') { pauseBtn.textContent = '⏸ Пауза'; }
       if (role === 'host' || (syncAudioEnabled && audioUnlocked && audioBuffer && !isMuted)) {
+        await preSync();
         scheduleAudio();
         startAdaptiveSyncLoop();
       }
@@ -809,6 +824,7 @@ async function handleMsg(msg) {
             }
           }
           if (playing && !paused && startTime !== null) {
+            await preSync();
             scheduleAudio();
             startAdaptiveSyncLoop();
           }
@@ -860,6 +876,7 @@ async function doPlay(song) {
   resetScroll(); setStatus(''); startAnim(); startScroll();
 
   if (role === 'host') {
+    await preSync();
     scheduleAudio();
     startAdaptiveSyncLoop();
 
@@ -877,6 +894,7 @@ async function doPlay(song) {
         return;
       }
     }
+    await preSync();
     scheduleAudio();
     startAdaptiveSyncLoop();
   }
