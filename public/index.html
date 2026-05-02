@@ -226,15 +226,22 @@
       padding: 0 2px;
       position: relative;
       text-shadow: none;
-      transition: color 0.6s ease;
+      transition: color 0.6s ease, text-shadow 0.6s ease;
     }
     .word::before { content: attr(data-word); display: block; font-weight: 700; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
     .word.done { color: #333; }
     .word.pre-active {
       color: #7a0000;
+      text-shadow:
+        0 4px 12px rgba(0, 0, 0, 0.15),
+        0 8px 24px rgba(0, 0, 0, 0.08);
     }
     .word.active {
       color: #cc0000;
+      text-shadow:
+        0 4px 14px rgba(0, 0, 0, 0.25),
+        0 8px 30px rgba(0, 0, 0, 0.15),
+        0 14px 50px rgba(0, 0, 0, 0.07);
     }
 
     /* ── Список пісень ──────────────────────────────────────── */
