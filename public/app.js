@@ -1066,13 +1066,13 @@ function buildSongList() {
 function selectSong(song) {
   if (song === currentSong) return;
   currentSong = song;
+  loadingSong = song; // cancel any in-flight buffer load for previous song
+  clearBuffer();
   highlightSong(song, false);
   loadLyrics(song);
   if (role === 'host') {
     if (!playing) { playBtn.hidden = false; }
-    // FIX: скидаємо буфер і завантажуємо нову пісню
-    clearBuffer();
-    ensureBuffer(song).then(() => {}).catch(console.error);
+    ensureBuffer(song).then(() => {}).catch(() => {});
   }
 }
 
@@ -1594,7 +1594,16 @@ async function doPlay(song) {
 playBtn?.addEventListener('click', async () => {
   if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host') return;
   if (playing) {
-    ws.send(JSON.stringify({ type: 'stop' }));
+    // Stop locally immediately — host won't receive own broadcast (skipHost=true)
+    playing = false; paused = false; startTime = null;
+    stopAdaptiveSyncLoop();
+    stopNode();
+    releaseWakeLock();
+    stopAnim(); stopScroll(); clearHL(); resetScroll();
+    playBtn.textContent = '▶ Грати'; pauseBtn.hidden = true;
+    highlightSong(currentSong, false);
+    setStatus('Зупинено. Виберіть пісню та натисніть «Грати».');
+    try { ws.send(JSON.stringify({ type: 'stop' })); } catch {}
     return;
   }
   // Ensure AudioContext is unlocked — iOS may suspend it again after inactivity
@@ -1643,12 +1652,24 @@ playBtn?.addEventListener('click', async () => {
 pauseBtn?.addEventListener('click', async () => {
   if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host' || !playing) return;
   if (paused) {
-    // Pre-sync offset before resume — same pattern as initial play
-    // This ensures host's offset is fresh when scheduleAudio runs
+    // Resume — apply locally immediately
+    paused = false;
+    pauseBtn.textContent = '⏸ Пауза';
+    setStatus('');
+    startAnim(); startScroll(); requestWakeLock();
     await preSync();
     ws.send(JSON.stringify({ type: 'resume', song: currentSong }));
+    scheduleAudio();
+    startAdaptiveSyncLoop();
   } else {
-    ws.send(JSON.stringify({ type: 'pause', song: currentSong }));
+    // Pause — apply locally immediately
+    paused = true;
+    pauseBtn.textContent = '▶ Продовжити';
+    setStatus('Пауза.');
+    stopAdaptiveSyncLoop();
+    stopNode();
+    stopAnim(); stopScroll();
+    try { ws.send(JSON.stringify({ type: 'pause', song: currentSong })); } catch {}
   }
 });
 
