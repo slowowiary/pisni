@@ -1231,7 +1231,7 @@ createBtn?.addEventListener('click', async () => {
     const { roomId: id } = await res.json();
     localStorage.setItem('karaoke_host_room', id);
     history.pushState(null, '', '/room/' + id);
-    initAudio(); audioUnlocked = true;
+    unlockAudio(); // повне розблокування iOS AudioContext через user gesture
     await enterRoom(id);
   } catch (err) {
     createBtn.disabled = false; createBtn.textContent = '🎵 Створити кімнату';
@@ -1379,6 +1379,7 @@ async function handleMsg(msg) {
       const incomingSong = msg.song;
       startTime          = msg.startTime;
       syncAudioEnabled   = msg.syncAudio || false;
+      window._playStartedAt = Date.now(); // track when this play session started
 
       // FIX: якщо пісня змінилась — скидаємо буфер, завантажуємо нову
       if (incomingSong !== currentSong) {
@@ -1445,6 +1446,12 @@ async function handleMsg(msg) {
 
     // ── Stop ─────────────────────────────────────────────────────────────────
     case 'stop': {
+      // Ignore stale stop: if we started playing AFTER this stop was broadcast,
+      // the stop is outdated. sessionId is Date.now() when stop was sent.
+      // _playStartedAt is set when we receive 'play' command.
+      if (msg.sessionId && window._playStartedAt && window._playStartedAt > msg.sessionId) {
+        break; // our play is newer than this stop — ignore it
+      }
       playing = false; paused = false; startTime = null;
       stopAdaptiveSyncLoop();
       stopNode();
@@ -1549,8 +1556,10 @@ async function doPlay(song) {
   resetScroll(); setStatus(''); startAnim(); startScroll();
 
   if (role === 'host') {
-    // preSync already done in playBtn handler before ws.send('play')
-    // Doing it again here adds 120ms delay and causes host to start late
+    // Ensure AudioContext is running before scheduling
+    if (audioCtx && audioCtx.state !== 'running') {
+      try { await audioCtx.resume(); } catch {}
+    }
     scheduleAudio();
     startAdaptiveSyncLoop();
 
@@ -1586,6 +1595,8 @@ playBtn?.addEventListener('click', async () => {
     ws.send(JSON.stringify({ type: 'stop' }));
     return;
   }
+  // Ensure AudioContext is unlocked — iOS may suspend it again after inactivity
+  unlockAudio();
   // Спочатку завантажуємо буфер — тільки після успіху надсилаємо play
   // Якщо відправити play до завантаження — всі учасники отримають команду,
   // але хост може зламатись при завантаженні і десинхронізуватись
