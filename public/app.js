@@ -810,27 +810,29 @@ function updateScroll() {
   const active = lyricsEl.querySelector('.word.active');
   if (!active) return;
   const containerH = lyricsCont.clientHeight;
-  const wordTop    = active.offsetTop; // position of active word in lyrics element
-  const relPos     = wordTop - currentScrollY; // position relative to visible area top
+  const wordTop    = active.offsetTop;
+  const relPos     = wordTop - currentScrollY; // word position in visible area
 
-  // How far down the word is as a fraction of container height (0=top, 1=bottom)
+  // Fraction: 0 = top of container, 1 = bottom
   const fraction = relPos / containerH;
 
-  // Target: keep word near top quarter of container.
-  // The lower the word is (larger fraction), the more aggressively we scroll it up.
-  // When fraction < 0.25 — word is near top, no need to move much
-  // When fraction > 0.25 — start pulling up, speed increases with position
-  let targetFraction;
-  if (fraction <= 0.15) {
-    targetFraction = 0.15; // already near top, keep it there
-  } else {
-    // Gradually pull word toward 15% from top, proportional to how low it is
-    targetFraction = 0.15;
-  }
+  // Target: always try to keep active word at ~25% from top (second line area).
+  // The target itself is fixed — what changes is HOW FAST we move toward it.
+  const TARGET_FRACTION = 0.25;
+  const newTarget = Math.max(0, wordTop - containerH * TARGET_FRACTION);
 
-  const newTarget = Math.max(0, wordTop - containerH * targetFraction);
-  // Blend toward new target — more urgently when word is lower
-  const urgency = Math.max(0.3, Math.min(1.0, fraction * 1.5));
+  // Speed curve: starts moving when word passes 20% mark,
+  // accelerates strongly as word goes lower.
+  // fraction < 0.20 → no scroll needed
+  // fraction 0.20–0.50 → gentle scroll
+  // fraction 0.50–0.80 → faster
+  // fraction > 0.80 → urgent
+  if (fraction < 0.20) return; // word is already near top, don't scroll
+
+  // Exponential urgency: small when word is slightly below target, large when far below
+  const excess = fraction - 0.20; // how far past the threshold
+  const urgency = Math.min(1.0, excess * excess * 6); // quadratic, caps at 1.0
+
   targetScrollY = targetScrollY + (newTarget - targetScrollY) * urgency;
 }
 
