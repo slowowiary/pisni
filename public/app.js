@@ -182,6 +182,7 @@ let currentSong    = null;
 // Аудіо
 let audioCtx       = null;
 let gainNode       = null;
+let globalVolume   = 0.8; // 0.0 – 1.0, synced from host
 let sourceNode     = null;
 let audioBuffer    = null;   // завантажений буфер ТІЛЬКИ поточної пісні
 let loadingSong    = null;   // яка пісня зараз завантажується (щоб не дублювати)
@@ -228,7 +229,7 @@ function initAudio() {
   if (audioCtx) return;
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   gainNode  = audioCtx.createGain();
-  gainNode.gain.value = isMuted ? 0 : 1;
+  gainNode.gain.value = isMuted ? 0 : globalVolume;
   gainNode.connect(audioCtx.destination);
 }
 
@@ -303,7 +304,7 @@ async function scheduleAudio() {
   src.buffer = audioBuffer;
   src._when  = when;
   src._off   = off;
-  gainNode.gain.value = isMuted ? 0 : 1;
+  gainNode.gain.value = isMuted ? 0 : globalVolume;
   src.connect(gainNode);
   src.start(when, off);
   // Record wall clock and ctx time anchor for throttle detection
@@ -1087,7 +1088,7 @@ function updateSpeakerUI() {
 if (headerToggle) {
   headerToggle.addEventListener('click', async () => {
     isMuted = !isMuted;
-    if (gainNode) gainNode.gain.value = isMuted ? 0 : 1;
+    if (gainNode) gainNode.gain.value = isMuted ? 0 : globalVolume;
     updateSpeakerUI();
     // Якщо вмикаємо звук під час відтворення — синхронізуємось
     if (!isMuted && syncAudioEnabled && audioUnlocked && playing && !paused && startTime !== null) {
@@ -1110,6 +1111,37 @@ function getClientId() {
 // =============================================================================
 // Boot
 // =============================================================================
+// Apply volume to gainNode and update slider UI
+function applyVolume(vol) {
+  globalVolume = Math.max(0, Math.min(1, vol));
+  if (gainNode && !isMuted) gainNode.gain.value = globalVolume;
+  const slider = document.getElementById('volume-slider');
+  const label  = document.getElementById('volume-label');
+  if (slider) {
+    slider.value = Math.round(globalVolume * 100);
+    slider.style.setProperty('--vol', slider.value + '%');
+  }
+  if (label) label.textContent = Math.round(globalVolume * 100) + '%';
+}
+
+// Volume slider — host only
+(function() {
+  const slider = document.getElementById('volume-slider');
+  if (!slider) return;
+  // Init gradient
+  slider.style.setProperty('--vol', slider.value + '%');
+  slider.addEventListener('input', () => {
+    const vol = parseInt(slider.value) / 100;
+    slider.style.setProperty('--vol', slider.value + '%');
+    document.getElementById('volume-label').textContent = slider.value + '%';
+    applyVolume(vol);
+    // Send to all clients via WebSocket
+    if (ws && ws.readyState === WebSocket.OPEN && role === 'host') {
+      ws.send(JSON.stringify({ type: 'set_volume', volume: vol }));
+    }
+  });
+})();
+
 async function init() {
   const p = new URLSearchParams(location.search).get('p');
   if (p) history.replaceState(null, '', p);
@@ -1220,6 +1252,9 @@ async function handleMsg(msg) {
       // Не додаємо зразок з joined — RTT WebSocket невідомий, фіктивне 30ms спотворює offset
 
       if (role === 'host') {
+        // Show volume slider for host
+        const volRow = document.getElementById('volume-row');
+        if (volRow) volRow.hidden = false;
         if (DEBUG_SYNC) {
           _dbg.setLabel('host');
           _dbg.event('role', 'host — debug panel');
@@ -1262,6 +1297,7 @@ async function handleMsg(msg) {
         lyricsCont.hidden = true;
         syncAudioEnabled = msg.syncAudio || false;
         setHeaderToggle(syncAudioEnabled);
+        if (msg.volume !== undefined) applyVolume(msg.volume);
         setStatus('Очікування хоста…');
       }
       break;
@@ -1271,6 +1307,11 @@ async function handleMsg(msg) {
       break;
 
     // ── Debug log from client ─────────────────────────────────────────────────
+    case 'set_volume': {
+      applyVolume(msg.volume ?? 0.8);
+      break;
+    }
+
     case 'debug_log': {
       if (!DEBUG_SYNC || role !== 'host') break;
       if (Array.isArray(msg.lines)) {
