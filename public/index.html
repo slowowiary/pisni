@@ -286,22 +286,22 @@
       display: inline-flex;
       align-items: center;
       gap: .5rem;
-      background: linear-gradient(135deg, #e91e63, #c2185b);
-      color: #fff;
-      border: none;
+      background: transparent;
+      color: #222;
+      border: 1.5px solid #aaa;
       padding: .8rem 2rem;
       font-size: 1rem;
-      font-weight: 700;
+      font-weight: 600;
       border-radius: 30px;
       cursor: pointer;
       margin: 1rem auto;
-      box-shadow: 0 4px 14px rgba(233,30,99,.35);
-      transition: transform .15s, box-shadow .15s;
+      box-shadow: none;
+      transition: border-color .15s, box-shadow .15s;
     }
+    #donate-btn .heart { color: #e91e63; }
     #donate-btn:hover {
-      background: linear-gradient(135deg, #c2185b, #ad1457);
-      transform: translateY(-2px);
-      box-shadow: 0 6px 20px rgba(233,30,99,.45);
+      border-color: #666;
+      box-shadow: 0 2px 8px rgba(0,0,0,.10);
     }
 
     /* ── Модальне вікно ─────────────────────────────────────── */
@@ -455,7 +455,7 @@
 
 <!-- Кнопка пожертвування -->
 <div style="text-align:center; padding: 0 1rem 1.2rem;">
-  <button id="donate-btn">❤️ Пожертвування</button>
+  <button id="donate-btn"><span class="heart">❤</span> Пожертвування</button>
 </div>
 
 <!-- Модальне вікно пожертвування -->
