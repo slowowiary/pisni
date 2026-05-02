@@ -109,7 +109,7 @@ export class KaraokeRoom {
         await this.state.storage.put('paused', false);
         await this.state.storage.delete('startTime');
         await this.state.storage.delete('pauseTime');
-        this.broadcastRetry({ type: 'stop' });
+        this.broadcastRetry({ type: 'stop', sessionId: Date.now() }, true);
       }
       return cors(json({ ok: true }));
     }
@@ -226,7 +226,7 @@ export class KaraokeRoom {
         await this.state.storage.put('paused',  false);
         await this.state.storage.delete('startTime');
         await this.state.storage.delete('pauseTime');
-        this.broadcastRetry({ type: 'stop' });
+        this.broadcastRetry({ type: 'stop', sessionId: Date.now() }, true);
         break;
 
       case 'sync_audio':
@@ -269,22 +269,25 @@ export class KaraokeRoom {
       this.state.storage.put('paused', false);
       this.state.storage.delete('startTime');
       this.state.storage.delete('pauseTime');
-      this.broadcastRetry({ type: 'stop' });
+      this.broadcastRetry({ type: 'stop', sessionId: Date.now() }, true);
     }
   }
 
-  broadcast(msg) {
+  broadcast(msg, skipHost = false) {
     const raw = JSON.stringify(msg);
-    for (const s of this.sessions) { try { s.ws.send(raw); } catch {} }
+    for (const s of this.sessions) {
+      if (skipHost && s.role === 'host') continue;
+      try { s.ws.send(raw); } catch {}
+    }
   }
 
   // Broadcast with retry — for critical commands that must reach all clients.
   // Sends 3 times: immediately, after 3s, after 7s (total window ~10s).
   // Harmless if received multiple times — clients handle idempotently.
-  broadcastRetry(msg) {
-    this.broadcast(msg);
-    setTimeout(() => this.broadcast(msg), 3000);
-    setTimeout(() => this.broadcast(msg), 7000);
+  broadcastRetry(msg, skipHost = false) {
+    this.broadcast(msg, skipHost);
+    setTimeout(() => this.broadcast(msg, skipHost), 3000);
+    setTimeout(() => this.broadcast(msg, skipHost), 7000);
   }
 }
 
