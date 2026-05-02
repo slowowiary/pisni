@@ -1114,7 +1114,7 @@ function getClientId() {
 // Boot
 // =============================================================================
 // Apply volume to gainNode and update slider UI
-function applyVolume(vol, save = false) {
+function applyVolume(vol) {
   globalVolume = Math.max(0, Math.min(1, vol));
   if (gainNode && !isMuted) gainNode.gain.value = globalVolume;
   const slider = document.getElementById('volume-slider');
@@ -1124,8 +1124,6 @@ function applyVolume(vol, save = false) {
     slider.style.setProperty('--vol', slider.value + '%');
   }
   if (label) label.textContent = Math.round(globalVolume * 100) + '%';
-  // Save to localStorage when host explicitly sets volume
-  if (save) localStorage.setItem('karaoke_volume', String(globalVolume));
 }
 
 // Volume slider — host only
@@ -1134,20 +1132,15 @@ function applyVolume(vol, save = false) {
   if (!slider) return;
   // Init gradient
   slider.style.setProperty('--vol', slider.value + '%');
-  let _volDebounce = null;
   slider.addEventListener('input', () => {
     const vol = parseInt(slider.value) / 100;
     slider.style.setProperty('--vol', slider.value + '%');
     document.getElementById('volume-label').textContent = slider.value + '%';
-    // Apply locally immediately so host hears changes in real time
-    applyVolume(vol, true); // save=true — persist to localStorage
-    // Send to clients only after user stops moving slider (debounce 300ms)
-    clearTimeout(_volDebounce);
-    _volDebounce = setTimeout(() => {
-      if (ws && ws.readyState === WebSocket.OPEN && role === 'host') {
-        ws.send(JSON.stringify({ type: 'set_volume', volume: vol }));
-      }
-    }, 300);
+    applyVolume(vol);
+    // Send to all clients via WebSocket
+    if (ws && ws.readyState === WebSocket.OPEN && role === 'host') {
+      ws.send(JSON.stringify({ type: 'set_volume', volume: vol }));
+    }
   });
 })();
 
@@ -1182,16 +1175,6 @@ window.addEventListener('beforeunload', () => {
   const url = `${WORKER_URL}/room/${roomId}/host-stop?clientId=${encodeURIComponent(cid)}`;
   navigator.sendBeacon(url);
 });
-
-// =============================================================================
-// Periodic state check — catch missed commands (stop/play/volume) due to bad network
-// =============================================================================
-setInterval(async () => {
-  if (!roomId || !ws || ws.readyState !== WebSocket.OPEN) return;
-  if (role === 'host') return; // host is the source of truth
-  // Ask server for current state — it will resend if we're out of sync
-  ws.send(JSON.stringify({ type: 'state_check' }));
-}, 15000);
 
 // =============================================================================
 // Join / Create
@@ -1255,11 +1238,6 @@ function connectWS(id) {
 
   ws.addEventListener('close', () => {
     setStatus('Перепідключення…');
-    // Stop audio immediately when connection drops — server will resend play if needed
-    if (playing && !paused && role !== 'host') {
-      stopNode();
-      stopAdaptiveSyncLoop();
-    }
     setTimeout(() => connectWS(id), 2000);
   });
 }
@@ -1279,15 +1257,6 @@ async function handleMsg(msg) {
         // Show volume slider for host
         const volRow = document.getElementById('volume-row');
         if (volRow) volRow.hidden = false;
-        // Restore saved volume from localStorage
-        const savedVol = localStorage.getItem('karaoke_volume');
-        if (savedVol !== null) {
-          applyVolume(parseFloat(savedVol));
-          // Send to server so clients get correct volume
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'set_volume', volume: globalVolume }));
-          }
-        }
         if (DEBUG_SYNC) {
           _dbg.setLabel('host');
           _dbg.event('role', 'host — debug panel');
@@ -1330,7 +1299,7 @@ async function handleMsg(msg) {
         lyricsCont.hidden = true;
         syncAudioEnabled = msg.syncAudio || false;
         setHeaderToggle(syncAudioEnabled);
-        if (msg.volume !== undefined && msg.role !== 'host') applyVolume(msg.volume);
+        if (msg.volume !== undefined) applyVolume(msg.volume);
         setStatus('Очікування хоста…');
       }
       break;
@@ -1341,9 +1310,7 @@ async function handleMsg(msg) {
 
     // ── Debug log from client ─────────────────────────────────────────────────
     case 'set_volume': {
-      // Host is source of truth — ignore incoming set_volume on host side
-      // (avoids feedback loop where finalizeJoin sends volume back to host)
-      if (role !== 'host') applyVolume(msg.volume ?? 0.8);
+      applyVolume(msg.volume ?? 0.8);
       break;
     }
 
@@ -1362,6 +1329,7 @@ async function handleMsg(msg) {
     case 'play': {
       const incomingSong = msg.song;
       startTime          = msg.startTime;
+      paused             = false;
       syncAudioEnabled   = msg.syncAudio || false;
 
       // FIX: якщо пісня змінилась — скидаємо буфер, завантажуємо нову
@@ -1372,23 +1340,12 @@ async function handleMsg(msg) {
         await loadLyrics(incomingSong);
       }
 
-      if (msg.alreadyPaused) {
-        // Reconnecting while paused — load song state but don't start audio
-        playing = true;
-        paused  = true;
-        startAnim(); // show lyrics position
-        if (role === 'host') { pauseBtn.textContent = '▶ Продовжити'; }
-        else setStatus('Хост поставив на паузу…');
-      } else {
-        paused = false;
-        await doPlay(incomingSong);
-      }
+      await doPlay(incomingSong);
       break;
     }
 
     // ── Pause ────────────────────────────────────────────────────────────────
     case 'pause': {
-      if (!playing) break; // ignore stale pause if not playing
       paused = true;
       stopAdaptiveSyncLoop();
       stopNode();
@@ -1400,7 +1357,6 @@ async function handleMsg(msg) {
 
     // ── Resume ───────────────────────────────────────────────────────────────
     case 'resume': {
-      if (!playing) break; // ignore stale resume if not playing
       startTime        = msg.startTime;
       paused           = false;
       syncAudioEnabled = msg.syncAudio || false;
@@ -1425,8 +1381,10 @@ async function handleMsg(msg) {
       playing = false; paused = false; startTime = null;
       stopAdaptiveSyncLoop();
       stopNode();
+      if (gainNode) { gainNode.gain.setValueAtTime(0, audioCtx?.currentTime || 0); }
       releaseWakeLock();
       stopAnim(); stopScroll(); clearHL(); resetScroll();
+      setTimeout(() => { if (gainNode) gainNode.gain.setValueAtTime(isMuted ? 0 : 1, audioCtx?.currentTime || 0); }, 100);
       if (role === 'host') {
         playBtn.hidden = false;
         playBtn.textContent = '▶ Грати'; pauseBtn.hidden = true;
@@ -1570,47 +1528,20 @@ playBtn?.addEventListener('click', async () => {
   if (!audioBuffer || currentSong !== song) {
     setStatus('⏳ Завантаження…');
     playBtn.disabled = true;
-    // Auto-retry up to 5 times with 1.5s delay between attempts
-    let loaded = false;
-    for (let attempt = 1; attempt <= 5; attempt++) {
-      try {
-        await ensureBuffer(song);
-        loaded = true;
-        break;
-      } catch (e) {
-        if (attempt < 5) {
-          setStatus(`⏳ Завантаження… (спроба ${attempt}/5)`);
-          await new Promise(r => setTimeout(r, 1500));
-        } else {
-          playBtn.disabled = false;
-          setStatus('⚠ Не вдалось завантажити. Перевірте з’єднання.');
-          return;
-        }
-      }
+    try {
+      await ensureBuffer(song);
+      setStatus('');
+    } catch (e) {
+      playBtn.disabled = false;
+      setStatus('⚠ ' + e.message + ' — натисніть «Грати» ще раз');
+      return;
     }
-    setStatus('');
     playBtn.disabled = false;
   }
   // preSync тут — щоб offset був свіжим ДО відправки команди
+  // Хост і клієнт матимуть менший розрив між своїми serverNow() в момент scheduleAudio()
   await preSync();
-  // Send play — but only if still not playing (guard against double-tap)
-  if (!playing) {
-    ws.send(JSON.stringify({ type: 'play', song }));
-    // Wait up to 4s for server confirmation (case 'play' sets playing=true)
-    // If not confirmed, retry sending once more
-    let confirmed = false;
-    const confirmTimeout = setTimeout(() => {
-      if (!playing && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'play', song }));
-      }
-    }, 4000);
-    // Cancel retry if playing started
-    const checkConfirm = setInterval(() => {
-      if (playing) { clearTimeout(confirmTimeout); clearInterval(checkConfirm); }
-    }, 200);
-    // Auto-cleanup after 5s regardless
-    setTimeout(() => clearInterval(checkConfirm), 5000);
-  }
+  ws.send(JSON.stringify({ type: 'play', song }));
 });
 
 pauseBtn?.addEventListener('click', async () => {
