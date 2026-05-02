@@ -1,1404 +1,545 @@
-// =============================================================================
-// Karaoke – frontend v4
-// =============================================================================
-const WORKER_URL = 'https://pisni.slovo-wiry.workers.dev';
-'use strict';
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Slowiary Worship</title>
+  <style>
+    [hidden] { display: none !important; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-// =============================================================================
-// DEBUG SYNC SYSTEM
-// Set DEBUG_SYNC = true to enable. Zero overhead when false.
-// =============================================================================
-const DEBUG_SYNC = false; // set to true to enable sync debug panel and logging
-const _DBG_START  = Date.now(); // session start for external timestamp use
+    body {
+      background: #f0f4ff;
+      color: #1a1a2e;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+    }
 
-const _dbg = (() => {
-  if (!DEBUG_SYNC) {
-    // Return no-op stubs — no overhead
-    const noop = () => {};
-    return { log: noop, event: noop, initPanel: noop };
-  }
+    /* ── ШАПКА ─────────────────────────────────────────────── */
+    header {
+      background: #fff;
+      border-bottom: 2px solid #dde3ff;
+      padding: 0 1.5rem;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      box-shadow: 0 2px 8px rgba(63,81,181,.08);
+    }
+    .header-brand {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+    }
+    .header-logo {
+      width: 50px;
+      height: auto;
+      object-fit: contain;
+    }
+    .header-worship {
+      font-size: 1rem;
+      font-weight: 700;
+      color: #3f51b5;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
 
-  const MAX_ENTRIES  = 1000;
-  const SESSION_START = Date.now();
-  const buffer       = [];
-  let   panelEl      = null;
-  let   panelBody    = null;
-  let   uiTimer      = null;
+    /* Динамік клієнта в шапці */
+    #header-audio-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 42px; height: 42px;
+      border-radius: 50%;
+      border: 2px solid #c5cae9;
+      background: #e8eaf6;
+      cursor: pointer;
+      font-size: 1.3rem;
+      transition: border-color .2s, background .2s;
+      user-select: none;
+    }
+    #header-audio-toggle:hover { border-color: #3f51b5; }
+    #header-audio-toggle.muted {
+      border-color: #ef9a9a;
+      background: #ffebee;
+    }
 
-  function ts() {
-    const s = ((Date.now() - SESSION_START) / 1000).toFixed(1);
-    return `+${s}s`;
-  }
+    /* ── ОСНОВНИЙ КОНТЕНТ ───────────────────────────────────── */
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1.5rem 1.5rem 2rem;
+      gap: 1.2rem;
+      max-width: 860px;
+      width: 100%;
+      margin: 0 auto;
+    }
 
-  let _clientLabel = 'host'; // updated after role is known
+    /* ── Екран входу (join) ──────────────────────────────────── */
+    #join-screen {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1.2rem;
+      text-align: center;
+      padding: 2rem 1rem;
+      max-width: 420px;
+    }
+    #join-screen .join-icon { font-size: 3rem; }
+    #join-screen h2 { font-size: 1.5rem; color: #3f51b5; font-weight: 700; }
+    #join-screen p  { color: #555; font-size: .95rem; line-height: 1.6; }
+    #join-btn {
+      background: #3f51b5; color: #fff; border: none;
+      padding: .9rem 3rem; font-size: 1.1rem; font-weight: 600;
+      border-radius: 10px; cursor: pointer;
+      transition: background .15s, transform .1s;
+    }
+    #join-btn:hover  { background: #303f9f; transform: translateY(-1px); }
+    #join-btn:active { transform: translateY(0); }
 
-  function setLabel(label) { _clientLabel = label; }
+    /* ── Кімната ─────────────────────────────────────────────── */
+    #status { font-size: .9rem; color: #888; min-height: 1.3em; text-align: center; }
 
-  function log(line) {
-    // Prefix every line with client label so merged logs are identifiable
-    const tagged = `[${_clientLabel}] ${line}`;
-    buffer.push(tagged);
-    if (buffer.length > MAX_ENTRIES) buffer.shift();
-  }
+    #room-url-label { font-size: .75rem; color: #999; margin-bottom: -.6rem; }
 
-  function event(label, data) {
-    const parts = [ts(), `[${label}]`];
-    if (data) parts.push(data);
-    log(parts.join(' '));
-  }
+    /* Обгортка: посилання + QR поруч */
+    #room-url-row {
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+      width: 100%;
+    }
+    #room-url {
+      background: #fff; border: 1px solid #c5cae9; border-radius: 8px;
+      padding: .55rem 1rem; font-size: .85rem; color: #3f51b5;
+      word-break: break-all; cursor: pointer; flex: 1; text-align: center;
+      transition: border-color .15s;
+    }
+    #room-url:hover { border-color: #3f51b5; }
 
-  function scheduleUiUpdate() {
-    if (uiTimer || !panelBody) return;
-    uiTimer = setTimeout(() => {
-      uiTimer = null;
-      if (!panelBody) return;
-      const last50 = buffer.slice(-50).join('\n');
-      panelBody.textContent = last50;
-      panelBody.scrollTop   = panelBody.scrollHeight;
-    }, 1000);
-  }
+    /* QR-код */
+    #qr-wrap {
+      flex-shrink: 0;
+      width: 72px; height: 72px;
+      border: 1px solid #c5cae9; border-radius: 8px;
+      background: #fff;
+      display: flex; align-items: center; justify-content: center;
+      overflow: hidden;
+      cursor: pointer;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    #qr-wrap:hover { border-color: #3f51b5; box-shadow: 0 2px 8px rgba(63,81,181,.15); }
+    #qr-wrap canvas, #qr-wrap img { display: block; width: 64px !important; height: 64px !important; }
 
-  function initPanel() {
-    if (panelEl) return;
+    .btn-row { display: flex; gap: .8rem; align-items: center; justify-content: center; flex-wrap: wrap; }
 
-    panelEl = document.createElement('div');
-    Object.assign(panelEl.style, {
-      position:   'fixed',
-      bottom:     '0',
-      right:      '0',
-      width:      '340px',
-      height:     '220px',
-      background: 'rgba(0,0,0,0.88)',
-      color:      '#0f0',
-      fontSize:   '10px',
-      fontFamily: 'monospace',
-      zIndex:     '99999',
-      display:    'flex',
-      flexDirection: 'column',
-      borderTopLeftRadius: '6px',
-      overflow:   'hidden',
+    button {
+      background: #3f51b5; color: #fff; border: none;
+      padding: .75rem 2.2rem; font-size: 1rem; font-weight: 600;
+      border-radius: 8px; cursor: pointer;
+      transition: background .15s, transform .1s;
+    }
+    button:hover  { background: #303f9f; transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+    button:disabled { background: #bbb; cursor: not-allowed; transform: none; }
+    #pause-btn { background: #5c6bc0; padding: .75rem 1.6rem; }
+    #pause-btn:hover { background: #3949ab; }
+
+    /* Галочка хоста */
+    #sync-audio-label {
+      display: flex; align-items: center; gap: .6rem;
+      cursor: pointer; padding: .55rem 1.1rem;
+      border: 2px solid #c5cae9; border-radius: 8px;
+      background: #fff; font-size: .9rem; color: #555;
+      user-select: none;
+      transition: border-color .15s, background .15s;
+    }
+    #sync-audio-label:hover { border-color: #3f51b5; }
+    #sync-audio-label.on { border-color: #3f51b5; background: #e8eaf6; color: #3f51b5; font-weight: 600; }
+    #sync-audio-label input { accent-color: #3f51b5; width: 1rem; height: 1rem; cursor: pointer; }
+
+    /* ── Блок субтитрів ─────────────────────────────────────── */
+    #lyrics-container {
+      width: 100%; max-width: 720px;
+      height: 320px;
+      overflow: hidden;
+      position: relative;
+      background: #fff;
+      border: 1px solid #dde3ff;
+      border-radius: 12px;
+      padding: 1.2rem 1.8rem;
+    }
+    #lyrics-container::before,
+    #lyrics-container::after {
+      content: ''; position: absolute; left: 0; right: 0; height: 48px;
+      pointer-events: none; z-index: 2;
+    }
+    #lyrics-container::before { top: 0;    background: linear-gradient(#fff, transparent); }
+    #lyrics-container::after  { bottom: 0; background: linear-gradient(transparent, #fff); }
+
+    #lyrics {
+      font-size: clamp(1.2rem, 3.5vw, 1.8rem);
+      line-height: 2.3;
+      text-align: center;
+      will-change: transform;
+    }
+    .word {
+      display: inline-block;
+      color: #999;
+      font-weight: 400;
+      border-radius: 4px;
+      padding: 0 2px;
+      /* плавна поява/зникнення жовтого фону */
+      background-color: transparent;
+      color: #444;
+      position: relative;
+      transition: color 0.4s ease;
+    }
+    .word::before { content: attr(data-word); display: block; font-weight: 700; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
+    /* підсвітлення через псевдоелемент позаду тексту */
+    .word::after {
+      content: '';
+      position: absolute;
+      /* tight fit — тільки навколо самих букв, не виходить далеко */
+      inset: 0px -3px;
+      border-radius: 4px;
+      background: rgba(120, 210, 255, 0.0);
+      /* малий blur — м'які краї але пляма не розповзається */
+      filter: blur(4px);
+      transition: background 1.2s ease;
+      pointer-events: none;
+      /* не -1 щоб не проглядали білі фони сусідніх слів */
+      z-index: 0;
+    }
+    /* текст поверх свічення */
+    .word { isolation: isolate; }
+    .word.done { color: #888; }
+    .word.done::after { background: rgba(120, 210, 255, 0.0); }
+    .word.pre-active::after {
+      background: rgba(120, 210, 255, 0.35);
+    }
+    .word.active::after {
+      background: rgba(120, 210, 255, 0.70);
+    }
+
+    /* ── Список пісень ──────────────────────────────────────── */
+    #song-picker {
+      width: 100%; background: #fff;
+      border: 1px solid #dde3ff; border-radius: 10px; overflow: hidden;
+    }
+    #song-picker-title {
+      padding: .6rem 1rem; font-size: .75rem; color: #999;
+      border-bottom: 1px solid #f0f0f0;
+      text-transform: uppercase; letter-spacing: .05em;
+    }
+    #song-list { list-style: none; overflow-y: auto; }
+    #song-list li {
+      padding: .7rem 1rem; cursor: pointer;
+      border-bottom: 1px solid #f5f5f5;
+      display: flex; align-items: center; gap: .8rem;
+      transition: background .1s; font-size: .95rem;
+    }
+    #song-list li:last-child { border-bottom: none; }
+    #song-list li:hover  { background: #e8eaf6; }
+    #song-list li.active { background: #e8eaf6; color: #3f51b5; font-weight: 600; }
+    #song-list li .num   { color: #bbb; font-size: .8rem; min-width: 1.8rem; }
+    #song-list li .name  { flex: 1; }
+    #song-list li .playing-icon { animation: bounce .5s infinite alternate; }
+    @keyframes bounce { from{transform:scaleY(.8)} to{transform:scaleY(1.2)} }
+
+    /* Головна */
+    #home-view {
+      display: flex; flex-direction: column; align-items: center;
+      gap: 1rem; padding: 3rem 0;
+    }
+
+    footer {
+      background: #fff; border-top: 1px solid #dde3ff;
+      padding: 1rem 2rem; text-align: center;
+      font-size: .8rem; color: #bbb;
+    }
+
+    /* ── Кнопка пожертвування ───────────────────────────────── */
+    #donate-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: .5rem;
+      background: linear-gradient(135deg, #e91e63, #c2185b);
+      color: #fff;
+      border: none;
+      padding: .8rem 2rem;
+      font-size: 1rem;
+      font-weight: 700;
+      border-radius: 30px;
+      cursor: pointer;
+      margin: 1rem auto;
+      box-shadow: 0 4px 14px rgba(233,30,99,.35);
+      transition: transform .15s, box-shadow .15s;
+    }
+    #donate-btn:hover {
+      background: linear-gradient(135deg, #c2185b, #ad1457);
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(233,30,99,.45);
+    }
+
+    /* ── Модальне вікно ─────────────────────────────────────── */
+    #donate-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.5);
+      z-index: 500;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+    #donate-overlay.open { display: flex; }
+
+    #donate-modal {
+      background: #fff;
+      border-radius: 16px;
+      padding: 2rem;
+      max-width: 460px;
+      width: 100%;
+      box-shadow: 0 12px 40px rgba(0,0,0,.2);
+      position: relative;
+    }
+    #donate-modal h2 {
+      font-size: 1.2rem;
+      font-weight: 800;
+      color: #3f51b5;
+      margin-bottom: 1.2rem;
+      text-align: center;
+      line-height: 1.4;
+    }
+    .donate-row {
+      display: flex;
+      gap: .5rem;
+      align-items: flex-start;
+      padding: .55rem 0;
+      border-bottom: 1px solid #eee;
+      font-size: .9rem;
+      color: #333;
+    }
+    .donate-row:last-of-type { border-bottom: none; }
+    .donate-label {
+      font-weight: 700;
+      color: #555;
+      min-width: 70px;
+      flex-shrink: 0;
+    }
+    .donate-value {
+      word-break: break-all;
+    }
+    #donate-link-btn {
+      display: block;
+      width: 100%;
+      margin-top: 1.2rem;
+      background: linear-gradient(135deg, #e91e63, #c2185b);
+      color: #fff;
+      border: none;
+      padding: .8rem;
+      font-size: 1rem;
+      font-weight: 700;
+      border-radius: 10px;
+      cursor: pointer;
+      text-align: center;
+      text-decoration: none;
+      transition: background .15s;
+    }
+    #donate-link-btn:hover { background: linear-gradient(135deg,#c2185b,#ad1457); }
+    #donate-close {
+      position: absolute;
+      top: .8rem; right: 1rem;
+      background: none;
+      border: none;
+      font-size: 1.5rem;
+      color: #aaa;
+      cursor: pointer;
+      padding: .2rem .4rem;
+      line-height: 1;
+    }
+    #donate-close:hover { color: #333; transform: none; background: none; box-shadow: none; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="header-brand">
+      <img src="data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD/4QA6RXhpZgAATU0AKgAAAAgAA1EQAAEAAAABAQAAAFERAAQAAAABAAAAAFESAAQAAAABAAAAAAAAAAD/2wBDAAIBAQIBAQICAgICAgICAwUDAwMDAwYEBAMFBwYHBwcGBwcICQsJCAgKCAcHCg0KCgsMDAwMBwkODw0MDgsMDAz/2wBDAQICAgMDAwYDAwYMCAcIDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAz/wAARCAH0AfQDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD9/KKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiivgX/guN/wAFxv8AhzEnwwY/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2sMhdGFwrafDaTGQBWUBpCmJGyhYKy+4fC3/AINyP2Kfg948sPEej/Abw/c6hp3meVFrOq6lrVi++No28yzvbmW3l+VyR5kbbWCsuGVWH21RRYVzA+F3wo8LfA/wLY+F/BXhrQPCHhnTPM+x6Romnw6fY2nmSNLJ5cESqibpHd22gZZ2J5JNb9FFMAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooA//9k=" alt="Slowiary" class="header-logo">
+      <span class="header-worship">Worship</span>
+    </div>
+    <div id="header-audio-toggle" hidden title="Натисніть щоб заглушити">
+      <span class="speaker-icon">🔊</span>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- Головна сторінка -->
+    <div id="home-view" hidden>
+      <button id="create-btn" style="font-size:1.1rem;padding:1rem 3rem">🎵 Створити кімнату</button>
+    </div>
+
+    <!-- Екран входу для клієнта -->
+    <div id="join-screen" hidden>
+      <div class="join-icon">🎵🎵🎵</div>
+      <h2>Християнські пісні</h2>
+      <p>Заходь щоб співати!</p>
+      <button id="join-btn">Зайти</button>
+    </div>
+
+    <!-- Кімната -->
+    <div id="room-view" hidden style="width:100%;display:flex;flex-direction:column;align-items:center;gap:1.2rem">
+      <label id="sync-audio-label" hidden>
+        <input type="checkbox" id="sync-audio-check">
+        📻 Грати музику на всіх пристроях
+      </label>
+      <p id="room-url-label">Поділіться посиланням з друзями</p>
+      <div id="room-url-row">
+        <div id="room-url" title="Натисніть, щоб скопіювати"></div>
+        <div id="qr-wrap" title="QR-код посилання"></div>
+      </div>
+      <div id="status"></div>
+
+      <div class="btn-row">
+        <button id="play-btn"  hidden>▶ Грати</button>
+        <button id="pause-btn" hidden>⏸ Пауза</button>
+      </div>
+
+
+
+      <div id="lyrics-container" hidden>
+        <div id="lyrics"></div>
+      </div>
+
+      <div id="song-picker" hidden>
+        <div id="song-picker-title">Список пісень</div>
+        <ul id="song-list"></ul>
+      </div>
+
+    </div>
+
+  </main>
+<div style="text-align: center; padding:10px;">
+  <a href="https://pisni.slovo-wiry.workers.dev/">Створити нову кімнату</a>
+</div>
+
+<!-- Кнопка пожертвування -->
+<div style="text-align:center; padding: 0 1rem 1.2rem;">
+  <button id="donate-btn">❤️ Пожертвування</button>
+</div>
+
+<!-- Модальне вікно пожертвування -->
+<div id="donate-overlay">
+  <div id="donate-modal">
+    <button id="donate-close" title="Закрити">×</button>
+    <h2>🙏 Kościół Zielonoświątkowy<br>„Słowo Wiary" w Warszawie</h2>
+    <div class="donate-row">
+      <span class="donate-label">PLN</span>
+      <span class="donate-value">PL41 1090 1753 0000 0001 4197 1368</span>
+    </div>
+    <div class="donate-row">
+      <span class="donate-label">USD</span>
+      <span class="donate-value">PL38 1090 1753 0000 0001 4358 7927</span>
+    </div>
+    <div class="donate-row">
+      <span class="donate-label">NIP</span>
+      <span class="donate-value">5242817003</span>
+    </div>
+    <div class="donate-row">
+      <span class="donate-label">REGON</span>
+      <span class="donate-value">366142357</span>
+    </div>
+    <div class="donate-row">
+      <span class="donate-label">📍</span>
+      <span class="donate-value">Wyborna 20, 03-681 Warszawa</span>
+    </div>
+    <div class="donate-row">
+      <span class="donate-label">📞</span>
+      <span class="donate-value">+48 504 739 000</span>
+    </div>
+    <a id="donate-link-btn" href="https://form.jotform.com/231102937473352" target="_blank" rel="noopener">
+      💳 Перейти до оплати
+    </a>
+  </div>
+</div>
+
+  <footer>© 2026 Słowo Wiary Worship · Всі права захищені by <a style="color: #bbb;" href="https://webprogger.wordpress.com/">WebProgger</a></footer>
+
+  <script>
+    // Модальне вікно пожертвування
+    const donateBtn = document.getElementById('donate-btn');
+    const donateOverlay = document.getElementById('donate-overlay');
+    const donateClose = document.getElementById('donate-close');
+    donateBtn.addEventListener('click', () => donateOverlay.classList.add('open'));
+    donateClose.addEventListener('click', () => donateOverlay.classList.remove('open'));
+    donateOverlay.addEventListener('click', (e) => {
+      if (e.target === donateOverlay) donateOverlay.classList.remove('open');
     });
+  </script>
 
-    // Header bar
-    const header = document.createElement('div');
-    Object.assign(header.style, {
-      display:    'flex',
-      justifyContent: 'space-between',
-      alignItems: 'center',
-      padding:    '3px 6px',
-      background: 'rgba(0,255,0,0.15)',
-      flexShrink: '0',
+  <script src="/app.js"></script>
+  <video id="wake-video" loop muted playsinline
+  style="position:fixed;width:1px;height:1px;opacity:0;pointer-events:none">
+  <source src="data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28ybXA0MQAAAAhmcmVlAAAA" type="video/mp4">
+</video>
+<script>
+// iOS Wake Lock — грає порожнє відео щоб екран не гас
+document.addEventListener('click', () => {
+  const v = document.getElementById('wake-video');
+  if (v && v.paused) v.play().catch(() => {});
+}, { once: true });
+</script>
+
+  <!-- QR-код: бібліотека без бекенду -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script>
+    // Генерує QR прямо в браузері — без бекенду
+    let qrInstance = null;
+
+    function updateQR(url) {
+      const wrap = document.getElementById('qr-wrap');
+      if (!wrap || !url) return;
+      wrap.innerHTML = '';
+      qrInstance = new QRCode(wrap, {
+        text: url,
+        width: 64,
+        height: 64,
+        colorDark: '#1a1a2e',
+        colorLight: '#ffffff',
+        correctLevel: QRCode.CorrectLevel.M
+      });
+    }
+
+    // Перехоплюємо момент коли roomUrlEl отримує текст
+    const _origEnterRoom = window._enterRoomPatch;
+    const roomUrlEl2 = document.getElementById('room-url');
+    if (roomUrlEl2) {
+      const observer = new MutationObserver(() => {
+        const url = roomUrlEl2.textContent.trim();
+        if (url && url.startsWith('http')) updateQR(url);
+      });
+      observer.observe(roomUrlEl2, { childList: true, characterData: true, subtree: true });
+    }
+
+    // Клік на QR — копіює посилання
+    document.getElementById('qr-wrap')?.addEventListener('click', () => {
+      const url = document.getElementById('room-url')?.textContent?.trim();
+      if (!url) return;
+      navigator.clipboard.writeText(url).then(() => {
+        const wrap = document.getElementById('qr-wrap');
+        const prev = wrap.innerHTML;
+        wrap.innerHTML = '<div style="font-size:.6rem;color:#3f51b5;text-align:center;padding:4px;font-weight:700">Скопійовано!</div>';
+        setTimeout(() => { wrap.innerHTML = prev; }, 1500);
+      });
     });
-    header.innerHTML = '<span>⚡ sync debug</span>';
-
-    const btnRow = document.createElement('div');
-    btnRow.style.display = 'flex';
-    btnRow.style.gap     = '4px';
-
-    const copyBtn = document.createElement('button');
-    copyBtn.textContent = 'Copy';
-    Object.assign(copyBtn.style, {
-      fontSize:   '9px',
-      padding:    '1px 5px',
-      cursor:     'pointer',
-      background: '#1a1',
-      color:      '#fff',
-      border:     'none',
-      borderRadius: '3px',
-    });
-    copyBtn.onclick = () => {
-      navigator.clipboard.writeText(buffer.join('\n'))
-        .then(() => { copyBtn.textContent = 'Copied!'; setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500); })
-        .catch(() => { copyBtn.textContent = 'Error'; });
-    };
-
-    const clearBtn = document.createElement('button');
-    clearBtn.textContent = 'Clear';
-    Object.assign(clearBtn.style, {
-      fontSize:   '9px',
-      padding:    '1px 5px',
-      cursor:     'pointer',
-      background: '#441',
-      color:      '#fff',
-      border:     'none',
-      borderRadius: '3px',
-    });
-    clearBtn.onclick = () => { buffer.length = 0; if (panelBody) panelBody.textContent = ''; };
-
-    const hideBtn = document.createElement('button');
-    hideBtn.textContent = '✕';
-    Object.assign(hideBtn.style, {
-      fontSize:   '9px',
-      padding:    '1px 5px',
-      cursor:     'pointer',
-      background: 'transparent',
-      color:      '#888',
-      border:     'none',
-    });
-    hideBtn.onclick = () => { panelEl.style.display = 'none'; };
-
-    btnRow.appendChild(copyBtn);
-    btnRow.appendChild(clearBtn);
-    btnRow.appendChild(hideBtn);
-    header.appendChild(btnRow);
-
-    // Log body
-    panelBody = document.createElement('pre');
-    Object.assign(panelBody.style, {
-      flex:       '1',
-      margin:     '0',
-      padding:    '4px 6px',
-      overflowY:  'auto',
-      overflowX:  'hidden',
-      whiteSpace: 'pre-wrap',
-      wordBreak:  'break-all',
-      fontSize:   '9.5px',
-    });
-
-    panelEl.appendChild(header);
-    panelEl.appendChild(panelBody);
-    document.body.appendChild(panelEl);
-  }
-
-  function getBuffer() {
-    const out = buffer.splice(0); // drain: send and clear
-    return out;
-  }
-  return { log, event, scheduleUiUpdate, initPanel, setLabel, getBuffer };
-})();
-
-
-// ── Стан ─────────────────────────────────────────────────────────────────────
-let ws             = null;
-let role           = null;   // 'host' | 'participant'
-let roomId         = null;
-
-// Відтворення
-let playing        = false;
-let paused         = false;
-let startTime      = null;   // серверний ms старту (з +3с offset від worker)
-let currentSong    = null;
-
-// Аудіо
-let audioCtx       = null;
-let gainNode       = null;
-let sourceNode     = null;
-let audioBuffer    = null;   // завантажений буфер ТІЛЬКИ поточної пісні
-let loadingSong    = null;   // яка пісня зараз завантажується (щоб не дублювати)
-let audioUnlocked  = false;  // user gesture відбувся
-let isMuted        = false;
-
-// Sync
-let syncAudioEnabled = false; // хост увімкнув "грати на всіх"
-let clockSamples   = [];
-let offset         = 0;
-
-// UI
-let lyrics         = [];
-let animFrame      = null;
-let scrollFrame    = null;
-let currentScrollY = 0;
-let targetScrollY  = 0;
-let songs          = [];
-let wakeLock       = null;
-
-// ── DOM ───────────────────────────────────────────────────────────────────────
-const $ = id => document.getElementById(id);
-const homeView     = $('home-view');
-const joinScreen   = $('join-screen');
-const joinBtn      = $('join-btn');
-const roomView     = $('room-view');
-const createBtn    = $('create-btn');
-const playBtn      = $('play-btn');
-const pauseBtn     = $('pause-btn');
-const syncLabel    = $('sync-audio-label');
-const syncCheck    = $('sync-audio-check');
-const headerToggle = $('header-audio-toggle');
-const songPicker   = $('song-picker');
-const songListEl   = $('song-list');
-const lyricsCont   = $('lyrics-container');
-const lyricsEl     = $('lyrics');
-const roomUrlEl    = $('room-url');
-const statusEl     = $('status');
-
-// =============================================================================
-// AudioContext
-// =============================================================================
-function initAudio() {
-  if (audioCtx) return;
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  gainNode  = audioCtx.createGain();
-  gainNode.gain.value = isMuted ? 0 : 1;
-  gainNode.connect(audioCtx.destination);
-}
-
-function unlockAudio() {
-  initAudio();
-  // Тихий буфер — розблоковує iOS
-  const buf = audioCtx.createBuffer(1, 1, 22050);
-  const src = audioCtx.createBufferSource();
-  src.buffer = buf;
-  src.connect(audioCtx.destination);
-  src.start(0);
-  if (audioCtx.state === 'suspended') audioCtx.resume();
-  audioUnlocked = true;
-}
-
-// Завантажує MP3. Якщо вже завантажений — повертає кеш.
-// FIX: скидає audioBuffer якщо пісня змінилась
-async function ensureBuffer(song) {
-  // Вже є правильний буфер
-  if (audioBuffer && currentSong === song) return audioBuffer;
-  // Якщо буфер від іншої пісні — скидаємо
-  if (audioBuffer && currentSong !== song) audioBuffer = null;
-  initAudio();
-  loadingSong = song;
-  try {
-    const res = await fetch('/songs/' + song + '/' + song + '.mp3');
-    if (!res.ok) throw new Error('MP3 not found: ' + song);
-    const arr = await res.arrayBuffer();
-    if (loadingSong !== song) throw new Error('Song changed during load');
-    audioBuffer = await new Promise((ok, fail) => audioCtx.decodeAudioData(arr, ok, fail));
-    loadingSong = null;
-    return audioBuffer;
-  } catch (e) {
-    loadingSong = null;
-    audioBuffer = null;
-    throw e;
-  }
-}
-
-function clearBuffer() {
-  audioBuffer = null;
-  loadingSong = null;
-}
-
-// =============================================================================
-// Планування відтворення
-// =============================================================================
-async function scheduleAudio() {
-  if (!audioBuffer || startTime === null || !audioCtx) return;
-  stopNode();
-  if (audioCtx.state !== 'running') {
-    try { await audioCtx.resume(); } catch {}
-  }
-  const msUntil = startTime - serverNow();
-  const elapsed = Math.max(0, -msUntil / 1000);
-  // No SAFETY_OFFSET in file position — adding it to 'off' causes getActualPos()
-  // to return (elapsed + SAFETY_OFFSET) which is always ~30ms above expected,
-  // creating a permanent fake drift that triggers endless restarts.
-  // Web Audio src.start(when, off) with 'when' in the future provides its own buffer.
-  const off = Math.min(elapsed, audioBuffer.duration - 0.01);
-  if (off >= audioBuffer.duration) return;
-  const when = Math.max(audioCtx.currentTime + 0.005,
-                        audioCtx.currentTime + msUntil / 1000);
-  const src = audioCtx.createBufferSource();
-  src.buffer = audioBuffer;
-  src._when  = when;
-  src._off   = off;
-  gainNode.gain.value = isMuted ? 0 : 1;
-  src.connect(gainNode);
-  src.start(when, off);
-  if (DEBUG_SYNC) _dbg.event('scheduleAudio', `off=${off.toFixed(3)}s when=${when.toFixed(3)} startTime=${startTime} offset=${offset.toFixed(1)}ms`);
-  sourceNode = src;
-  src.onended = () => {
-    if (sourceNode === src) { sourceNode = null; if (role === 'host' && playing) songEnded(); }
-  };
-}
-
-function stopNode() {
-  if (sourceNode) {
-    try { sourceNode.stop(0); } catch {}
-    try { sourceNode.disconnect(); } catch {}
-    sourceNode = null;
-  }
-}
-
-function songEnded() {
-  playing = false; paused = false; startTime = null;
-  playBtn.hidden = false;
-  playBtn.textContent = '▶ Грати';
-  pauseBtn.hidden = true;
-  setStatus('Пісня закінчилась. Виберіть наступну.');
-  stopAnim(); clearHL(); highlightSong(currentSong, false);
-}
-
-// =============================================================================
-// Синхронізація годинника
-// =============================================================================
-function serverNow() { return Date.now() + offset; }
-
-function addSample(srvTime, t0) {
-  const rtt = Date.now() - t0;
-  const rawOff = srvTime - (t0 + rtt / 2);
-
-  // Sanity check: discard only truly impossible values (>24h difference)
-  // 24h covers any timezone mismatch — a device with wrong timezone has a stable
-  // but shifted Date.now(). We should accept it and use the offset as-is.
-  // Values beyond 24h suggest a broken clock or corrupted response.
-  const MAX_OFFSET = 86400000; // 24 hours in ms
-  if (Math.abs(rawOff) > MAX_OFFSET) {
-    if (DEBUG_SYNC) _dbg.event('offset-BAD', `discarded rawOff=${rawOff.toFixed(0)}ms rtt=${rtt}ms`);
-    return;
-  }
-
-  // Also discard if RTT looks like a timeout (>2000ms) — server was unreachable
-  if (rtt > 2000) {
-    if (DEBUG_SYNC) _dbg.event('offset-BAD', `discarded rtt=${rtt}ms`);
-    return;
-  }
-
-  clockSamples.push({ off: rawOff, rtt });
-  if (clockSamples.length > 12) clockSamples.shift();
-  const sorted  = [...clockSamples].sort((a, b) => a.rtt - b.rtt);
-  const use     = sorted.slice(0, Math.max(1, Math.floor(sorted.length * 0.7)));
-  const minRtt  = use[0].rtt;
-  let ws = 0, os = 0;
-  for (const s of use) { const w = minRtt / s.rtt; ws += w; os += s.off * w; }
-  const newOffset = os / ws;
-
-  if (clockSamples.length <= 1) {
-    // First sample after reset — trust fully (no previous value to compare)
-    const prevOff = offset;
-    offset = newOffset;
-    if (DEBUG_SYNC) _dbg.event('offset', `${prevOff.toFixed(1)}→${offset.toFixed(1)}ms (first)`);
-  } else {
-    const prevOff = offset;
-    // EMA 80/20 with 40ms/step clamp
-    const blended = offset * 0.8 + newOffset * 0.2;
-    const step    = Math.max(-40, Math.min(40, blended - offset));
-    offset        = offset + step;
-    if (DEBUG_SYNC) {
-      const delta = offset - prevOff;
-      if (Math.abs(delta) > 1) _dbg.event('offset', `${prevOff.toFixed(1)}→${offset.toFixed(1)}ms (Δ${delta > 0 ? '+' : ''}${delta.toFixed(1)})`);
-    }
-  }
-}
-
-// Початкова синхронізація при вході
-async function syncOnEntry(id) {
-  for (let i = 0; i < 3; i++) {
-    const t0  = Date.now();
-    const res = await fetch(`${WORKER_URL}/room/${id}/time`).catch(() => null);
-    if (res?.ok) addSample((await res.json()).serverTime, t0);
-    if (i < 2) await new Promise(r => setTimeout(r, 50));
-  }
-}
-
-// Точна синхронізація перед стартом аудіо
-// 4 заміри з паузою 30ms — достатньо точно, вкладається в 3с запас startTime
-// Скидаємо clockSamples тільки якщо музика не грає —
-// під час відтворення скидання дасть різкий стрибок offset → хибний drift
-async function preSync() {
-  if (DEBUG_SYNC) _dbg.event('preSync', `start offset=${offset.toFixed(1)}ms playing=${playing}`);
-  // Reset clockSamples on start, or if offset is absurd (>24h — broken device clock)
-  // Do NOT zero offset on corrupt reset — keep previous value as best estimate
-  // until new valid samples arrive. Zeroing causes exp=-3528s nonsense.
-  if (!playing || Math.abs(offset) > 86400000) {
-    clockSamples = [];
-    if (Math.abs(offset) > 86400000) {
-      if (DEBUG_SYNC) _dbg.event('preSync', `offset absurd (${offset.toFixed(0)}ms), resetting samples`);
-      // Keep offset as-is — new samples will correct it via EMA
-    }
-  }
-  for (let i = 0; i < 4; i++) {
-    const t0  = Date.now();
-    const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
-    if (res?.ok) {
-      addSample((await res.json()).serverTime, t0);
-      requestState.lastRequestTime = Date.now();
-    }
-    if (i < 3) await new Promise(r => setTimeout(r, 30));
-  }
-  if (DEBUG_SYNC) _dbg.event('preSync', `end offset=${offset.toFixed(1)}ms`);
-}
-
-// Поточна позиція відтворення в секундах
-function getActualPos() {
-  if (!sourceNode || !audioCtx) return null;
-  const elapsed = audioCtx.currentTime - sourceNode._when;
-  // ВАЖЛИВО: враховуємо playbackRate — без цього drift вимірюється неправильно
-  const rate    = sourceNode.playbackRate?.value ?? 1.0;
-  return sourceNode._off + elapsed * rate;
-}
-
-// =============================================================================
-// Adaptive Predictive Sync
-// =============================================================================
-const SAFETY_OFFSET = 0.03; // 30ms — достатньо для інтернету
-
-const syncState = {
-  driftHistory:       [],
-  smoothedRate:       1.0,
-  skipNext:           false,
-  lastRestartTime:    0,
-  longTermDrift:      0,
-  largeDriftCount:    0,     // скільки разів поспіль drift > 40ms
-  pendingRestart:     false, // перший великий drift → чекаємо підтвердження
-  stableCount:        0,     // скільки разів поспіль drift < 15ms (інерція)
-  lastOffset:         null,  // попередній offset після запиту — для виявлення стрибків
-  lastSmdSign:        0,     // sign of smoothedDrift last cycle — oscillation guard
-};
-
-const requestState = {
-  stabilityScore:  0,   // starts at 0 — fast initial cycles, builds up over time
-  lastDrift:       0,
-  lastRequestTime: 0,
-  minInterval:     5000,
-  maxInterval:     45000,
-};
-
-const urgencyState = {
-  level:         0,
-  lastSpikeTime: 0,
-};
-
-let syncLoopTimer = null;
-
-function _weightedAverage(values) {
-  let sum = 0, weightSum = 0;
-  values.forEach((v, i) => { const w = i + 1; sum += v * w; weightSum += w; });
-  return weightSum === 0 ? 0 : sum / weightSum;
-}
-function _jitter(interval) { return interval * (0.9 + Math.random() * 0.2); }
-
-function updateUrgency(drift, driftRate) {
-  const absDrift = Math.abs(drift);
-  const now      = Date.now();
-  if      (absDrift > 40) urgencyState.level += 50;
-  else if (absDrift > 20) urgencyState.level += 30;
-  else if (absDrift < 8)  urgencyState.level -= 10;
-  if (Math.abs(driftRate) > 2) {
-    urgencyState.level        += 10;
-    urgencyState.lastSpikeTime = now;
-  }
-  if (now - urgencyState.lastSpikeTime > 5000) urgencyState.level -= 5;
-  urgencyState.level = Math.max(0, Math.min(100, urgencyState.level));
-}
-
-function updateStability(drift, prevDrift) {
-  const absDrift   = Math.abs(drift);
-  const driftDelta = Math.abs(drift - prevDrift);
-  if      (absDrift < 8)  requestState.stabilityScore += 3;
-  else if (absDrift < 20) requestState.stabilityScore += 1;
-  else                    requestState.stabilityScore -= 15;
-  if (driftDelta > 10)    requestState.stabilityScore -= 5;
-  requestState.stabilityScore = Math.max(0, Math.min(100, requestState.stabilityScore));
-  requestState.lastDrift = drift;
-}
-
-function shouldRequest(forcedByDrift) {
-  if (forcedByDrift) return true;
-  const score   = requestState.stabilityScore;
-  const urgency = urgencyState.level;
-  // Жорстке блокування при високій стабільності і низькому urgency
-  if (score > 85 && urgency < 5) {
-    if (Date.now() - requestState.lastRequestTime < 30000) return false;
-  }
-  const elapsed        = Date.now() - requestState.lastRequestTime;
-  const effectiveScore = Math.max(0, Math.min(100, score - urgency));
-  const base           = requestState.minInterval +
-                         (requestState.maxInterval - requestState.minInterval) *
-                         (effectiveScore / 100);
-  return elapsed >= _jitter(base);
-}
-
-function calcTargetRate(driftRate, smoothedDrift) {
-  // Primary: driftRate contribution — reacts to growing drift
-  // At driftRate=10ms/s → correction=0.05% (inaudible)
-  const rateRaw  = -(driftRate * 0.00005);
-
-  // Secondary: weak direct smoothedDrift term — closes stable non-zero offset
-  // At smoothedDrift=20ms → correction=0.001 (closes 20ms gap in ~2 minutes)
-  // At smoothedDrift=5ms  → correction=0.00025 (below dead zone, ignored)
-  // This is intentionally tiny — avoids oscillation, just prevents permanent drift
-  const driftRaw = -(smoothedDrift * 0.00005);
-
-  const correction = Math.max(-0.005, Math.min(0.005, rateRaw + driftRaw));
-  let   targetRate = 1.0 + correction;
-
-  // Dead zone: correction < 0.1% → set exactly 1.0
-  // Reduced from 0.4% — that was too aggressive and suppressed valid corrections
-  if (Math.abs(targetRate - 1.0) < 0.001) targetRate = 1.0;
-  return targetRate;
-}
-
-function applyPlaybackRate(rate) {
-  if (!sourceNode) return;
-  sourceNode.playbackRate.setTargetAtTime(rate, audioCtx.currentTime, 0.5);
-}
-
-function localCorrection() {
-  if (syncState.skipNext || !playing || paused || startTime === null) return;
-  const actual = getActualPos();
-  if (actual === null) return;
-  // Якщо offset застарів — тільки дуже повільне повернення до 1.0
-  const isStale = (Date.now() - requestState.lastRequestTime) > 15000;
-  if (isStale) {
-    syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.02;
-    applyPlaybackRate(syncState.smoothedRate);
-    return;
-  }
-  const expected = (serverNow() - startTime) / 1000;
-  const drift    = (actual - expected) * 1000;
-  const absDrift = Math.abs(drift);
-  // Мертва зона 15ms — при малому drift нічого не робимо
-  if (absDrift < 15) {
-    syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
-    applyPlaybackRate(syncState.smoothedRate);
-    return;
-  }
-  // Є помітний drift але немає свіжого серверного заміру —
-  // тільки дуже слабке наближення до 1.0, без активної корекції
-  syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.03;
-  applyPlaybackRate(syncState.smoothedRate);
-}
-
-async function adaptiveSyncLoop() {
-  if (!playing || paused || startTime === null) { scheduleNext(); return; }
-  const actual = getActualPos();
-  if (actual === null) { scheduleNext(); return; }
-
-  const roughDrift       = (actual - (serverNow() - startTime) / 1000) * 1000;
-  const smoothedForForce = syncState.driftHistory.length > 0
-    ? _weightedAverage(syncState.driftHistory.map(h => h.drift)) : roughDrift;
-  const forcedRequest    = Math.abs(smoothedForForce) > 30;
-
-  if (!shouldRequest(forcedRequest)) {
-    if (DEBUG_SYNC) {
-      const _act = getActualPos();
-      const _exp = startTime !== null ? (serverNow() - startTime) / 1000 : 0;
-      const _d   = _act !== null ? ((_act - _exp) * 1000).toFixed(1) : 'n/a';
-      const _sd  = syncState.driftHistory.length > 0
-        ? _weightedAverage(syncState.driftHistory.map(h => h.drift)).toFixed(1) : '—';
-      _dbg.log(`${((Date.now()-_DBG_START)/1000).toFixed(1)}s [cycle] no-req | drift=${_d} smd=${_sd} rate=${syncState.smoothedRate.toFixed(4)} stab=${requestState.stabilityScore} urg=${urgencyState.level|0}`);
-      _dbg.scheduleUiUpdate();
-    }
-    localCorrection();
-    scheduleNext();
-    return;
-  }
-
-  // Один запит на сервер
-  const t0  = Date.now();
-  const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
-  if (!res?.ok) {
-    requestState.stabilityScore = Math.max(0, requestState.stabilityScore - 10);
-    urgencyState.level          = Math.min(100, urgencyState.level + 20);
-    localCorrection();
-    scheduleNext();
-    return;
-  }
-  addSample((await res.json()).serverTime, t0);
-  requestState.lastRequestTime = Date.now();
-
-  if (syncState.skipNext) { syncState.skipNext = false; scheduleNext(); return; }
-
-  // Offset щойно оновлений — isStale тут завжди false, але перевіряємо захисно
-  const isStale = (Date.now() - requestState.lastRequestTime) > 15000;
-  if (isStale) { scheduleNext(); return; }
-
-  const expected  = (serverNow() - startTime) / 1000;
-  const actualNow = getActualPos();
-  if (actualNow === null) { scheduleNext(); return; }
-
-  const drift    = (actualNow - expected) * 1000;
-  const absDrift = Math.abs(drift);
-
-  // Захист від шумного виміру: якщо expected різко стрибнув або drift аномальний
-  // — не додаємо в driftHistory, але продовжуємо цикл (не пропускаємо)
-  // Detect noisy measurement by comparing offset change between cycles,
-  // NOT expected change. expected grows naturally with time — comparing it
-  // always produces large "jumps". offset should be stable between cycles.
-  const prevOffset  = syncState.lastOffset ?? offset;
-  const offsetJump  = Math.abs(offset - prevOffset);
-  syncState.lastOffset = offset;
-  // Only offset jump is a reliable noise signal.
-  // absDrift > 80 was incorrectly filtering real large drifts as noise.
-  const isNoisy    = (offsetJump > 20 && syncState.driftHistory.length > 0);
-  if (!isNoisy) {
-    syncState.driftHistory.push({ drift, timestamp: Date.now() });
-    if (syncState.driftHistory.length > 8) syncState.driftHistory.shift();
-  }
-
-  const smoothedDrift = _weightedAverage(syncState.driftHistory.map(h => h.drift));
-  const history       = syncState.driftHistory;
-  // driftRate from last 3 entries only — reflects current trend, not historical average
-  // Using first-to-last spans minutes and produces stale/reversed rate values
-  let   driftRate = 0;
-  if (history.length >= 2) {
-    const tail   = history.slice(-3); // last 3 (or fewer if history is short)
-    const dtMs   = tail[tail.length-1].timestamp - tail[0].timestamp;
-    if (dtMs > 0) {
-      driftRate = (tail[tail.length-1].drift - tail[0].drift) / (dtMs / 1000);
-    }
-  }
-  driftRate = Math.max(-50, Math.min(50, driftRate)); // clamp аномальні значення
-
-  // Оновлюємо longTermDrift — дуже повільна адаптація
-  syncState.longTermDrift = syncState.longTermDrift +
-    (smoothedDrift - syncState.longTermDrift) * 0.02;
-
-  // Urgency decay завжди — незалежно від якості виміру
-  if (Date.now() - urgencyState.lastSpikeTime > 5000) {
-    urgencyState.level = Math.max(0, urgencyState.level - 5);
-  }
-  // Stability і urgency штрафи — тільки якщо вимір не шумний
-  if (!isNoisy) {
-    updateStability(drift, requestState.lastDrift);
-    updateUrgency(drift, driftRate);
-  } else {
-    // Навіть при шумному вимірі — дуже повільне повернення rate до 1.0
-    // Запобігає "замороженню" корекції на ненульовому значенні
-    if (DEBUG_SYNC) _dbg.log(`${((Date.now()-_DBG_START)/1000).toFixed(1)}s [cycle] NOISY | offJump=${offsetJump.toFixed(1)} drift=${drift.toFixed(1)} rate=${syncState.smoothedRate.toFixed(4)}`);
-    syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.02;
-    applyPlaybackRate(syncState.smoothedRate);
-    if (DEBUG_SYNC) _dbg.scheduleUiUpdate();
-    scheduleNext();
-    return;
-  }
-
-  // Рішення приймаємо за smoothedDrift (згладжений), не за сирим drift
-  // Один шумний вимір не змінить smoothedDrift суттєво
-  const absSmoothed = Math.abs(smoothedDrift);
-
-  if (DEBUG_SYNC) {
-    const _needsAct = absSmoothed >= 15 || Math.abs(drift) > 40;
-    const _decision = !_needsAct ? 'idle'
-      : (syncState.pendingRestart ? 'restart(pending)' : 'restart(first)');
-    _dbg.log(`${((Date.now()-_DBG_START)/1000).toFixed(1)}s [cycle] req | off=${offset.toFixed(1)} exp=${expected.toFixed(3)} act=${actualNow.toFixed(3)} drift=${drift.toFixed(1)} smd=${smoothedDrift.toFixed(1)} dRate=${driftRate.toFixed(2)} rate=${syncState.smoothedRate.toFixed(4)} dec=${_decision} stab=${requestState.stabilityScore} urg=${urgencyState.level|0}`);
-    _dbg.scheduleUiUpdate();
-  }
-
-  // Also trigger restart if raw drift is already large even if smd hasn't caught up.
-  // smd with 8-sample buffer lags 40-80s; raw drift > 40ms is immediately audible.
-  const needsAction = absSmoothed >= 15 || Math.abs(drift) > 40;
-
-  if (!needsAction) {
-    // Dead zone — drift inaudible, slowly return rate to 1.0
-    syncState.largeDriftCount = 0;
-    syncState.pendingRestart  = false;
-    syncState.lastSmdSign     = 0;
-    syncState.stableCount     = Math.min(syncState.stableCount + 1, 20);
-    syncState.smoothedRate    = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
-    applyPlaybackRate(syncState.smoothedRate);
-
-  } else {
-    // Audible drift (≥15ms) — restart immediately to correct position,
-    // then set playbackRate to compensate systematic drift going forward.
-    // Rate-only correction (old middle zone) took 4+ minutes to close 27ms — too slow.
-    // Restart is inaudible when position is accurate; cooldown prevents restart loops.
-    syncState.stableCount = 0;
-    syncState.lastSmdSign = 0;
-
-    const now        = Date.now();
-    const canRestart = (now - syncState.lastRestartTime) > 3000;
-
-    // In first 15s of playback, skip confirmation — initial offset error
-    // needs immediate correction. After 15s, require 2 consecutive measurements.
-    const playingForMs     = startTime !== null ? (serverNow() - startTime) : 99999;
-    const skipConfirmation = playingForMs < 15000;
-
-    if (!syncState.pendingRestart && !skipConfirmation) {
-      // Normal mode: set flag, verify next cycle
-      syncState.pendingRestart  = true;
-      syncState.largeDriftCount = 1;
-      syncState.smoothedRate    = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
-      applyPlaybackRate(syncState.smoothedRate);
-
-    } else if (canRestart && (skipConfirmation || syncState.pendingRestart)) {
-      // Confirmed by two consecutive cycles — restart now
-      syncState.lastRestartTime = now;
-      syncState.skipNext        = true;
-      syncState.largeDriftCount = 0;
-      syncState.pendingRestart  = false;
-      urgencyState.level          = Math.min(100, urgencyState.level + 20);
-      requestState.stabilityScore = Math.max(0, requestState.stabilityScore - 10);
-      if (DEBUG_SYNC) _dbg.event('RESTART', `smd=${smoothedDrift.toFixed(1)}ms drift=${drift.toFixed(1)}ms offset=${offset.toFixed(1)}ms`);
-      // Fresh offset before restart — stale offset causes landing 50-100ms off
-      await preSync();
-      scheduleAudio();
-      // Reset rate to 1.0 after restart — pre-restart smoothedDrift is stale
-      // and calcTargetRate would push in the wrong direction.
-      // Next cycles will measure real post-restart drift and correct if needed.
-      syncState.smoothedRate = 1.0;
-      applyPlaybackRate(1.0);
-
-    } else {
-      // Cooldown active — wait, nudge slowly toward 1.0
-      syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
-      applyPlaybackRate(syncState.smoothedRate);
-    }
-  }
-
-  scheduleNext();
-}
-
-function scheduleNext() {
-  if (syncLoopTimer) clearTimeout(syncLoopTimer);
-  const effectiveScore = Math.max(0, Math.min(100,
-    requestState.stabilityScore - urgencyState.level));
-  const base    = requestState.minInterval +
-                  (requestState.maxInterval - requestState.minInterval) *
-                  (effectiveScore / 100);
-  syncLoopTimer = setTimeout(adaptiveSyncLoop, _jitter(base));
-}
-
-function startAdaptiveSyncLoop() {
-  if (syncLoopTimer) clearTimeout(syncLoopTimer);
-  // Fast initial cycles: 1.5s → 3s → then normal schedule driven by stabilityScore
-  // This detects and corrects initial drift within 5s instead of 20-30s
-  // Jitter on first cycle so host+clients don't all hit server at the same ms
-  syncLoopTimer = setTimeout(() => {
-    adaptiveSyncLoop().then(() => {
-      if (syncLoopTimer !== null) {
-        syncLoopTimer = setTimeout(adaptiveSyncLoop, 3000 + Math.random() * 1000);
-      }
-    });
-  }, 1500 + Math.random() * 500);
-}
-
-function stopAdaptiveSyncLoop() {
-  if (syncLoopTimer) clearTimeout(syncLoopTimer);
-  syncLoopTimer = null;
-}
-
-// =============================================================================
-// Wake Lock
-// =============================================================================
-async function requestWakeLock() {
-  if (!('wakeLock' in navigator)) return;
-  // Не запитуємо повторно якщо вже активний
-  if (wakeLock && !wakeLock.released) return;
-  try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
-}
-function releaseWakeLock() {
-  // Хост тримає wake lock постійно — не відпускаємо під час сесії
-  if (role === 'host') return;
-  if (wakeLock) { wakeLock.release(); wakeLock = null; }
-}
-document.addEventListener('visibilitychange', () => {
-  // Браузер скасовує wake lock при переході вкладки у фон —
-  // відновлюємо як тільки вкладка знову стає активною.
-  // Для хоста — завжди; для клієнта — тільки під час відтворення.
-  if (document.visibilityState !== 'visible') return;
-  if (role === 'host' || (playing && !paused)) requestWakeLock();
-});
-
-// =============================================================================
-// Scroll
-// =============================================================================
-function startScroll() {
-  stopScroll();
-  (function tick() {
-    const diff = targetScrollY - currentScrollY;
-    if (Math.abs(diff) > 0.5) {
-      // Speed proportional to distance — naturally eases in and out
-      currentScrollY += diff * 0.04;
-      if (lyricsEl) lyricsEl.style.transform = `translateY(${-currentScrollY}px)`;
-    }
-    scrollFrame = requestAnimationFrame(tick);
-  })();
-}
-function stopScroll() { if (scrollFrame) { cancelAnimationFrame(scrollFrame); scrollFrame = null; } }
-function resetScroll() {
-  currentScrollY = 0; targetScrollY = 0;
-  if (lyricsEl) lyricsEl.style.transform = 'translateY(0)';
-}
-function updateScroll() {
-  if (!lyricsCont || !lyricsEl) return;
-  const active = lyricsEl.querySelector('.word.active');
-  if (!active) return;
-  const containerH = lyricsCont.clientHeight;
-  const wordTop    = active.offsetTop; // position of active word in lyrics element
-  const relPos     = wordTop - currentScrollY; // position relative to visible area top
-
-  // How far down the word is as a fraction of container height (0=top, 1=bottom)
-  const fraction = relPos / containerH;
-
-  // Target: keep word near top quarter of container.
-  // The lower the word is (larger fraction), the more aggressively we scroll it up.
-  // When fraction < 0.25 — word is near top, no need to move much
-  // When fraction > 0.25 — start pulling up, speed increases with position
-  let targetFraction;
-  if (fraction <= 0.15) {
-    targetFraction = 0.15; // already near top, keep it there
-  } else {
-    // Gradually pull word toward 15% from top, proportional to how low it is
-    targetFraction = 0.15;
-  }
-
-  const newTarget = Math.max(0, wordTop - containerH * targetFraction);
-  // Blend toward new target — more urgently when word is lower
-  const urgency = Math.max(0.3, Math.min(1.0, fraction * 1.5));
-  targetScrollY = targetScrollY + (newTarget - targetScrollY) * urgency;
-}
-
-// =============================================================================
-// Список пісень
-// =============================================================================
-async function loadSongList() {
-  try {
-    const res = await fetch(WORKER_URL + '/api/songs');
-    songs = res.ok ? await res.json() : ['test'];
-  } catch { songs = ['test']; }
-}
-
-function buildSongList() {
-  if (!songListEl) return;
-  songListEl.innerHTML = '';
-  songs.forEach((s, i) => {
-    const li   = document.createElement('li');
-    const name = s.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-    li.dataset.song = s;
-    li.innerHTML    = `<span class="num">${i+1}</span><span class="name">${name}</span>`;
-    li.addEventListener('click', () => selectSong(s));
-    songListEl.appendChild(li);
-  });
-}
-
-function selectSong(song) {
-  if (song === currentSong) return;
-  currentSong = song;
-  highlightSong(song, false);
-  loadLyrics(song);
-  if (role === 'host') {
-    if (!playing) { playBtn.hidden = false; }
-    // FIX: скидаємо буфер і завантажуємо нову пісню
-    clearBuffer();
-    ensureBuffer(song).then(() => {}).catch(console.error);
-  }
-}
-
-function highlightSong(song, isPlaying) {
-  if (!songListEl) return;
-  songListEl.querySelectorAll('li').forEach(li => {
-    const active = li.dataset.song === song;
-    li.classList.toggle('active', active);
-    li.querySelector('.playing-icon')?.remove();
-    if (active && isPlaying) {
-      const ic = document.createElement('span');
-      ic.className = 'playing-icon'; ic.textContent = '🎵';
-      li.appendChild(ic);
-    }
-  });
-}
-
-// =============================================================================
-// Динамік (клієнт)
-// =============================================================================
-function setHeaderToggle(show) {
-  if (!headerToggle) return;
-  headerToggle.hidden = !show;
-  if (show) updateSpeakerUI();
-}
-
-function updateSpeakerUI() {
-  if (!headerToggle) return;
-  const ic = headerToggle.querySelector('.speaker-icon');
-  if (ic) ic.textContent = isMuted ? '🔇' : '🔊';
-  headerToggle.classList.toggle('muted', isMuted);
-}
-
-if (headerToggle) {
-  headerToggle.addEventListener('click', async () => {
-    isMuted = !isMuted;
-    if (gainNode) gainNode.gain.value = isMuted ? 0 : 1;
-    updateSpeakerUI();
-    // Якщо вмикаємо звук під час відтворення — синхронізуємось
-    if (!isMuted && syncAudioEnabled && audioUnlocked && playing && !paused && startTime !== null) {
-      await preSync(); scheduleAudio(); startAdaptiveSyncLoop();
-    } else if (isMuted) {
-      stopNode();
-    }
-  });
-}
-
-// =============================================================================
-// Identity
-// =============================================================================
-function getClientId() {
-  let id = localStorage.getItem('karaoke_client_id');
-  if (!id) { id = crypto.randomUUID(); localStorage.setItem('karaoke_client_id', id); }
-  return id;
-}
-
-// =============================================================================
-// Boot
-// =============================================================================
-async function init() {
-  const p = new URLSearchParams(location.search).get('p');
-  if (p) history.replaceState(null, '', p);
-  await loadSongList();
-  const id = parseRoom();
-  if (id) {
-    roomId = id;
-    if (localStorage.getItem('karaoke_host_room') === id) {
-      // Хост — входить одразу
-      initAudio(); audioUnlocked = true;
-      await enterRoom(id);
-    } else {
-      joinScreen.hidden = false;
-    }
-  } else {
-    homeView.hidden = false;
-  }
-}
-
-function parseRoom() {
-  const m = location.pathname.match(/\/room\/([a-z0-9]+)/i);
-  return m ? m[1] : null;
-}
-
-// Коли хост закриває вкладку — надсилаємо stop через sendBeacon
-window.addEventListener('beforeunload', () => {
-  if (role !== 'host' || !roomId) return;
-  const cid = localStorage.getItem('karaoke_client_id') || '';
-  const url = `${WORKER_URL}/room/${roomId}/host-stop?clientId=${encodeURIComponent(cid)}`;
-  navigator.sendBeacon(url);
-});
-
-// =============================================================================
-// Join / Create
-// =============================================================================
-if (joinBtn) {
-  joinBtn.addEventListener('click', async () => {
-    unlockAudio(); // USER GESTURE — iOS вимагає тут
-    requestWakeLock();
-    joinScreen.hidden = true;
-    await enterRoom(roomId);
-  });
-}
-
-createBtn?.addEventListener('click', async () => {
-  createBtn.disabled = true; createBtn.textContent = 'Створення…';
-  try {
-    const cid = crypto.randomUUID();
-    localStorage.setItem('karaoke_client_id', cid);
-    const res = await fetch(`${WORKER_URL}/create?clientId=${encodeURIComponent(cid)}`);
-    if (!res.ok) throw new Error(res.status);
-    const { roomId: id } = await res.json();
-    localStorage.setItem('karaoke_host_room', id);
-    history.pushState(null, '', '/room/' + id);
-    initAudio(); audioUnlocked = true;
-    await enterRoom(id);
-  } catch (err) {
-    createBtn.disabled = false; createBtn.textContent = '🎵 Створити кімнату';
-    setStatus('Помилка: ' + err.message);
-  }
-});
-
-async function enterRoom(id) {
-  roomId = id;
-  homeView.hidden = true; joinScreen.hidden = true; roomView.hidden = false;
-  roomUrlEl.textContent = location.href;
-  setStatus('Синхронізація…');
-  await syncOnEntry(id);
-  setStatus('Підключення…');
-  connectWS(id);
-}
-
-// =============================================================================
-// WebSocket
-// =============================================================================
-function connectWS(id) {
-  const url = WORKER_URL.replace('https','wss').replace('http','ws') + '/room/' + id + '/ws';
-  ws = new WebSocket(url);
-
-  ws.addEventListener('open', () => {
-    ws.send(JSON.stringify({ type: 'hello', clientId: getClientId() }));
-    // Keepalive ping
-    setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN)
-        ws.send(JSON.stringify({ type: 'ping', clientTime: Date.now() }));
-    }, 20000);
-  });
-
-  ws.addEventListener('message', e => {
-    try { handleMsg(JSON.parse(e.data)); } catch(err) { console.error(err); }
-  });
-
-  ws.addEventListener('close', () => {
-    setStatus('Перепідключення…');
-    setTimeout(() => connectWS(id), 2000);
-  });
-}
-
-// =============================================================================
-// Обробка повідомлень
-// =============================================================================
-async function handleMsg(msg) {
-  switch (msg.type) {
-
-    // ── Підключення ──────────────────────────────────────────────────────────
-    case 'joined': {
-      role = msg.role;
-      // Не додаємо зразок з joined — RTT WebSocket невідомий, фіктивне 30ms спотворює offset
-
-      if (role === 'host') {
-        if (DEBUG_SYNC) {
-          _dbg.setLabel('host');
-          _dbg.event('role', 'host — debug panel');
-          _dbg.initPanel();
-        }
-        joinScreen.hidden = true;
-        buildSongList();
-        songPicker.hidden = false;
-        playBtn.hidden = true; pauseBtn.hidden = true;
-        syncLabel.hidden = false; setHeaderToggle(false);
-        lyricsCont.hidden = true;
-        // Відновлюємо стан галочки
-        const saved = localStorage.getItem('karaoke_sync_audio') === '1';
-        syncCheck.checked = saved;
-        syncLabel.classList.toggle('on', saved);
-        syncAudioEnabled = saved;
-        if (saved) ws.send(JSON.stringify({ type: 'sync_audio', enabled: true }));
-        setStatus('Виберіть пісню зі списку нижче.');
-        requestWakeLock(); // хост: тримаємо екран активним увесь час сесії
-
-      } else {
-        // Клієнт
-        if (DEBUG_SYNC) {
-          // Use short ID: last 4 chars of clientId for readable label
-          const _shortId = getClientId().slice(-4);
-          _dbg.setLabel(`c-${_shortId}`);
-          _dbg.event('role', `client c-${_shortId} — debug panel`);
-          _dbg.initPanel();
-          // Flush logs to host every 5 seconds via WebSocket
-          setInterval(() => {
-            if (!DEBUG_SYNC || role === 'host') return;
-            if (!ws || ws.readyState !== WebSocket.OPEN) return;
-            const lines = _dbg.getBuffer();
-            if (lines.length === 0) return;
-            ws.send(JSON.stringify({ type: 'debug_log', lines }));
-          }, 5000);
-        }
-        songPicker.hidden = true; playBtn.hidden = true;
-        pauseBtn.hidden = true; syncLabel.hidden = true;
-        lyricsCont.hidden = true;
-        syncAudioEnabled = msg.syncAudio || false;
-        setHeaderToggle(syncAudioEnabled);
-        setStatus('Очікування хоста…');
-      }
-      break;
-    }
-
-    case 'pong':
-      break;
-
-    // ── Debug log from client ─────────────────────────────────────────────────
-    case 'debug_log': {
-      if (!DEBUG_SYNC || role !== 'host') break;
-      if (Array.isArray(msg.lines)) {
-        msg.lines.forEach(line => _dbg.log(line));
-        _dbg.scheduleUiUpdate();
-      }
-      break;
-    }
-
-    // ── Play ─────────────────────────────────────────────────────────────────
-    // FIX: завжди оновлюємо currentSong з msg.song — навіть якщо пісня "та сама"
-    // щоб клієнт точно знав яку пісню грати
-    case 'play': {
-      const incomingSong = msg.song;
-      startTime          = msg.startTime;
-      paused             = false;
-      syncAudioEnabled   = msg.syncAudio || false;
-
-      // FIX: якщо пісня змінилась — скидаємо буфер, завантажуємо нову
-      if (incomingSong !== currentSong) {
-        stopNode();
-        clearBuffer();
-        currentSong = incomingSong;
-        await loadLyrics(incomingSong);
-      }
-
-      await doPlay(incomingSong);
-      break;
-    }
-
-    // ── Pause ────────────────────────────────────────────────────────────────
-    case 'pause': {
-      paused = true;
-      stopAdaptiveSyncLoop();
-      stopNode();
-      stopAnim(); stopScroll();
-      if (role === 'host') { pauseBtn.textContent = '▶ Продовжити'; setStatus('Пауза.'); }
-      else setStatus('Хост поставив на паузу…');
-      break;
-    }
-
-    // ── Resume ───────────────────────────────────────────────────────────────
-    // FIX: більше замірів при resume для точної синхронізації після паузи
-    case 'resume': {
-      startTime        = msg.startTime;
-      paused           = false;
-      syncAudioEnabled = msg.syncAudio || false;
-      startAnim(); startScroll(); requestWakeLock();
-      setStatus('');
-      if (role === 'host') { pauseBtn.textContent = '⏸ Пауза'; }
-      if (role === 'host' || (syncAudioEnabled && audioUnlocked && audioBuffer && !isMuted)) {
-        await preSync();
-        scheduleAudio();
-        startAdaptiveSyncLoop();
-      }
-      break;
-    }
-
-    // ── Stop ─────────────────────────────────────────────────────────────────
-    case 'stop': {
-      playing = false; paused = false; startTime = null;
-      stopAdaptiveSyncLoop();
-      stopNode();
-      if (gainNode) { gainNode.gain.setValueAtTime(0, audioCtx?.currentTime || 0); }
-      releaseWakeLock();
-      stopAnim(); stopScroll(); clearHL(); resetScroll();
-      setTimeout(() => { if (gainNode) gainNode.gain.setValueAtTime(isMuted ? 0 : 1, audioCtx?.currentTime || 0); }, 100);
-      if (role === 'host') {
-        playBtn.hidden = false;
-        playBtn.textContent = '▶ Грати'; pauseBtn.hidden = true;
-        highlightSong(currentSong, false);
-        setStatus('Зупинено. Виберіть пісню та натисніть «Грати».');
-      } else {
-        setStatus('Очікування хоста…');
-      }
-      break;
-    }
-
-    // ── Sync Audio ───────────────────────────────────────────────────────────
-    // FIX: коли хост вмикає sync_audio під час відтворення —
-    // завантажуємо буфер і тільки після повного завантаження синхронізуємось
-    // щоб не було розсинхрону через час завантаження
-    case 'sync_audio': {
-      syncAudioEnabled = msg.enabled;
-      if (role === 'host') break;
-
-      if (msg.enabled) {
-        setHeaderToggle(true);
-        // Оновлюємо currentSong якщо worker передав нову пісню
-        if (msg.song && msg.song !== currentSong) {
-          currentSong = msg.song;
-          clearBuffer();
-          await loadLyrics(msg.song);
-        }
-
-        if (!isMuted && audioUnlocked && currentSong) {
-          if (!audioBuffer) {
-            setStatus('⏳ Завантаження…');
-            try {
-              await ensureBuffer(currentSong);
-              setStatus('');
-            } catch (e) {
-              setStatus('⚠ ' + e.message); break;
-            }
-          }
-          if (playing && !paused && startTime !== null) {
-            await preSync();
-            scheduleAudio();
-            startAdaptiveSyncLoop();
-          }
-        }
-      } else {
-        setHeaderToggle(false);
-        stopNode();
-        clearBuffer();
-        setStatus('Очікування хоста…');
-      }
-      break;
-    }
-
-    case 'promoted': {
-      role = 'host';
-      buildSongList(); songPicker.hidden = false;
-      playBtn.hidden = !currentSong; syncLabel.hidden = false;
-      setHeaderToggle(false);
-      setStatus('Ви тепер хост.');
-      break;
-    }
-  }
-}
-
-// =============================================================================
-// doPlay — головна логіка запуску відтворення
-// =============================================================================
-async function doPlay(song) {
-  playing = true; paused = false;
-  requestWakeLock();
-  // Reset stability so first sync cycles run at fast interval (5s)
-  // After ~30s of stable play, score builds up and intervals lengthen naturally
-  requestState.stabilityScore = 0;
-  urgencyState.level = 0;
-  syncState.driftHistory = [];
-  syncState.stableCount  = 0;
-  syncState.pendingRestart = false;
-  syncState.largeDriftCount = 0;
-
-  if (role === 'host') {
-    // Буфер вже завантажено у playBtn handler до відправки команди play
-    // Якщо з якоїсь причини буфер відсутній — скидаємо стан і виходимо
-    if (!audioBuffer) {
-      playing = false;
-      playBtn.hidden = false; playBtn.textContent = '▶ Грати'; playBtn.disabled = false;
-      pauseBtn.hidden = true;
-      setStatus('⚠ Буфер не завантажено — натисніть «Грати» ще раз');
-      return;
-    }
-    playBtn.hidden = false;
-    playBtn.textContent = '⏹ Стоп';
-    pauseBtn.hidden = false; pauseBtn.textContent = '⏸ Пауза';
-    highlightSong(song, true);
-  }
-
-  lyricsCont.hidden = false;
-  resetScroll(); setStatus(''); startAnim(); startScroll();
-
-  if (role === 'host') {
-    await preSync();
-    scheduleAudio();
-    startAdaptiveSyncLoop();
-
-  } else if (syncAudioEnabled && audioUnlocked && !isMuted) {
-    if (!audioBuffer || currentSong !== song) {
-      stopNode();
-      clearBuffer();
-      setStatus('⏳ Завантаження…');
-      try {
-        // Load buffer and sync offset in parallel — offset stays fresh
-        // regardless of how long the MP3 takes to load
-        await Promise.all([ensureBuffer(song), preSync()]);
-        setStatus('');
-      } catch (e) {
-        stopNode(); clearBuffer();
-        setStatus('⚠ ' + e.message);
-        return;
-      }
-    } else {
-      await preSync();
-    }
-    scheduleAudio();
-    startAdaptiveSyncLoop();
-  }
-}
-
-// =============================================================================
-// Контроли хоста
-// =============================================================================
-playBtn?.addEventListener('click', async () => {
-  if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host') return;
-  if (playing) {
-    ws.send(JSON.stringify({ type: 'stop' }));
-    return;
-  }
-  // Спочатку завантажуємо буфер — тільки після успіху надсилаємо play
-  // Якщо відправити play до завантаження — всі учасники отримають команду,
-  // але хост може зламатись при завантаженні і десинхронізуватись
-  const song = currentSong || songs[0] || 'test';
-  if (!audioBuffer || currentSong !== song) {
-    setStatus('⏳ Завантаження…');
-    playBtn.disabled = true;
-    try {
-      await ensureBuffer(song);
-      setStatus('');
-    } catch (e) {
-      playBtn.disabled = false;
-      setStatus('⚠ ' + e.message + ' — натисніть «Грати» ще раз');
-      return;
-    }
-    playBtn.disabled = false;
-  }
-  // preSync тут — щоб offset був свіжим ДО відправки команди
-  // Хост і клієнт матимуть менший розрив між своїми serverNow() в момент scheduleAudio()
-  await preSync();
-  ws.send(JSON.stringify({ type: 'play', song }));
-});
-
-pauseBtn?.addEventListener('click', () => {
-  if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host' || !playing) return;
-  ws.send(JSON.stringify({ type: paused ? 'resume' : 'pause', song: currentSong }));
-});
-
-syncCheck?.addEventListener('change', () => {
-  syncLabel.classList.toggle('on', syncCheck.checked);
-  syncAudioEnabled = syncCheck.checked;
-  if (role === 'host' && ws?.readyState === WebSocket.OPEN) {
-    localStorage.setItem('karaoke_sync_audio', syncCheck.checked ? '1' : '0');
-    // FIX: передаємо також currentSong щоб клієнти знали яку пісню завантажувати
-    ws.send(JSON.stringify({ type: 'sync_audio', enabled: syncCheck.checked, song: currentSong }));
-  }
-});
-
-// =============================================================================
-// Lyrics
-// =============================================================================
-async function loadLyrics(song) {
-  try {
-    const res = await fetch('/songs/' + song + '/' + song + '.json');
-    if (!res.ok) { lyricsEl.innerHTML = ''; lyrics = []; return; }
-    lyrics = await res.json(); renderWords(); cacheSpans(); resetScroll();
-  } catch { lyricsEl.innerHTML = ''; lyrics = []; }
-}
-
-function renderWords() {
-  lyricsEl.innerHTML = '';
-  lyrics.forEach((e, i) => {
-    if (i > 0 && (e.start - lyrics[i-1].end) >= 2.0) {
-      const br = document.createElement('div');
-      br.style.height = '1.4em';
-      lyricsEl.appendChild(br);
-    }
-    const s = document.createElement('span');
-    s.textContent = e.word;
-    s.className   = 'word';
-    s.dataset.i   = i;
-    s.dataset.word = e.word;
-    lyricsEl.appendChild(s);
-    lyricsEl.appendChild(document.createTextNode(' '));
-  });
-}
-
-// =============================================================================
-// Animation
-// =============================================================================
-let wordSpans = [];
-
-function cacheSpans() {
-  wordSpans = Array.from(lyricsEl?.querySelectorAll('.word') || []);
-}
-
-function startAnim() {
-  stopAnim();
-  (function tick() {
-    if (!playing || paused || startTime === null) return;
-    const t = (serverNow() - startTime) / 1000;
-    const PRE = 1.0; // seconds before timing to start glow
-    for (let i = 0; i < wordSpans.length; i++) {
-      const w = lyrics[i];
-      if (!w) continue;
-      const active    = t >= w.start && t < w.end;
-      const done      = t >= w.end && !active;
-      // pre-active: starts PRE seconds before word timing, ends when active begins
-      const preActive = !active && !done && t >= (w.start - PRE) && t < w.start;
-      wordSpans[i].classList.toggle('active',     active);
-      wordSpans[i].classList.toggle('pre-active', preActive);
-      wordSpans[i].classList.toggle('done',       done);
-    }
-    updateScroll();
-    animFrame = requestAnimationFrame(tick);
-  })();
-}
-function stopAnim() { if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; } }
-function clearHL() {
-  wordSpans.forEach(s => s.classList.remove('active','done'));
-}
-
-function setStatus(m) { if (statusEl) statusEl.textContent = m; }
-
-document.addEventListener('click', e => {
-  if (e.target.id !== 'room-url') return;
-  navigator.clipboard.writeText(e.target.textContent).then(() => {
-    const o = e.target.textContent; e.target.textContent = 'Скопійовано!';
-    setTimeout(() => { e.target.textContent = o; }, 1500);
-  });
-});
-
-init();
+  </script>
+</body>
+</html>
