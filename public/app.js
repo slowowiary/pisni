@@ -252,22 +252,25 @@ async function ensureBuffer(song) {
   if (audioBuffer && currentSong === song) return audioBuffer;
   // Якщо буфер від іншої пісні — скидаємо
   if (audioBuffer && currentSong !== song) audioBuffer = null;
-  initAudio();
+  // If already loading a different song — cancel it by changing loadingSong
+  // The old load will see loadingSong !== its song and discard the result
   loadingSong = song;
+  initAudio();
   try {
     const _bufCtrl = new AbortController();
-    const _bufTimer = setTimeout(() => _bufCtrl.abort(), 15000); // 15s max
+    const _bufTimer = setTimeout(() => _bufCtrl.abort(), 15000);
     const res = await fetch('/songs/' + song + '/' + song + '.mp3',
       { signal: _bufCtrl.signal }).finally(() => clearTimeout(_bufTimer));
     if (!res.ok) throw new Error('MP3 not found: ' + song);
     const arr = await res.arrayBuffer();
-    if (loadingSong !== song) throw new Error('Song changed during load');
+    // If a newer load started for a different song — discard this result silently
+    if (loadingSong !== song) return null;
     audioBuffer = await new Promise((ok, fail) => audioCtx.decodeAudioData(arr, ok, fail));
+    currentSong = song; // ensure currentSong matches what we loaded
     loadingSong = null;
     return audioBuffer;
   } catch (e) {
-    loadingSong = null;
-    audioBuffer = null;
+    if (loadingSong === song) { loadingSong = null; audioBuffer = null; }
     throw e;
   }
 }
@@ -1480,7 +1483,9 @@ async function handleMsg(msg) {
         }
 
         if (!isMuted && audioUnlocked && currentSong) {
-          if (!audioBuffer) {
+          // Only preload buffer if we're already playing — otherwise wait for play command
+          // Preloading during idle can cause wrong-song bugs when host switches songs
+          if (!audioBuffer && playing && startTime !== null) {
             setStatus('⏳ Завантаження…');
             try {
               await ensureBuffer(currentSong);
@@ -1563,9 +1568,12 @@ async function doPlay(song) {
       clearBuffer();
       setStatus('⏳ Завантаження…');
       try {
-        // Load buffer and sync offset in parallel — offset stays fresh
-        // regardless of how long the MP3 takes to load
-        await Promise.all([ensureBuffer(song), preSync()]);
+        // Load buffer and sync offset in parallel
+        const [buf] = await Promise.all([ensureBuffer(song), preSync()]);
+        if (!buf) {
+          // ensureBuffer was superseded by a newer load — use whatever is current
+          if (!audioBuffer) { stopNode(); clearBuffer(); return; }
+        }
         setStatus('');
       } catch (e) {
         stopNode(); clearBuffer();
