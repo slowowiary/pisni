@@ -231,8 +231,10 @@ export class KaraokeRoom {
         break;
 
       case 'debug_log':
-        // Forward client debug logs to host only — no storage, no broadcast
-        if (session.role === 'host') return; // host doesn't send debug_log
+        // Debug logging support — used when DEBUG_SYNC=true in app.js
+        // Forwards client sync logs to host so all devices' logs appear in one panel.
+        // Safe to leave here: when DEBUG_SYNC=false, clients never send debug_log messages.
+        if (session.role === 'host') return;
         for (const s of this.sessions) {
           if (s.role === 'host') {
             try { s.ws.send(JSON.stringify(msg)); } catch {}
