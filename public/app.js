@@ -8,7 +8,7 @@ const WORKER_URL = 'https://pisni.slovo-wiry.workers.dev';
 // DEBUG SYNC SYSTEM
 // Set DEBUG_SYNC = true to enable. Zero overhead when false.
 // =============================================================================
-const DEBUG_SYNC = false; // set to true to enable sync debug panel and logging
+const DEBUG_SYNC = true; // set to true to enable sync debug panel and logging
 const _DBG_START  = Date.now(); // session start for external timestamp use
 
 const _dbg = (() => {
