@@ -1376,9 +1376,16 @@ async function handleMsg(msg) {
         // Reconnecting while paused — load song state but don't start audio
         playing = true;
         paused  = true;
-        startAnim(); // show lyrics position
+        startAnim();
         if (role === 'host') { pauseBtn.textContent = '▶ Продовжити'; }
         else setStatus('Хост поставив на паузу…');
+      } else if (role === 'host' && playing) {
+        // Host already started via direct optimistic start in playBtn handler.
+        // Server broadcast arrived — update startTime if different and let
+        // adaptiveSyncLoop handle any small drift. Don't restart audio.
+        if (Math.abs(startTime - msg.startTime) > 100) {
+          startTime = msg.startTime;
+        }
       } else {
         paused = false;
         await doPlay(incomingSong);
@@ -1593,24 +1600,18 @@ playBtn?.addEventListener('click', async () => {
   }
   // preSync тут — щоб offset був свіжим ДО відправки команди
   await preSync();
-  // Send play — but only if still not playing (guard against double-tap)
-  if (!playing) {
-    ws.send(JSON.stringify({ type: 'play', song }));
-    // Wait up to 4s for server confirmation (case 'play' sets playing=true)
-    // If not confirmed, retry sending once more
-    let confirmed = false;
-    const confirmTimeout = setTimeout(() => {
-      if (!playing && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'play', song }));
-      }
-    }, 4000);
-    // Cancel retry if playing started
-    const checkConfirm = setInterval(() => {
-      if (playing) { clearTimeout(confirmTimeout); clearInterval(checkConfirm); }
-    }, 200);
-    // Auto-cleanup after 5s regardless
-    setTimeout(() => clearInterval(checkConfirm), 5000);
-  }
+  // Guard against double-tap
+  if (playing) return;
+  ws.send(JSON.stringify({ type: 'play', song }));
+  // Host starts audio immediately without waiting for own broadcast.
+  // On bad network, broadcast may be delayed — host would stay silent
+  // while clients already play. Instead: host schedules audio right now
+  // using the startTime the server will set (now + 3000ms buffer).
+  // We optimistically set startTime = serverNow() + 3000ms, same as server.
+  // If broadcast arrives later with a slightly different startTime, doPlay
+  // will resync via adaptiveSyncLoop within the first few seconds.
+  startTime = serverNow() + 3000;
+  await doPlay(song);
 });
 
 pauseBtn?.addEventListener('click', async () => {
