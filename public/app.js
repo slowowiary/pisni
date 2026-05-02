@@ -1446,12 +1446,6 @@ async function handleMsg(msg) {
 
     // ── Stop ─────────────────────────────────────────────────────────────────
     case 'stop': {
-      // Ignore stale stop: if we started playing AFTER this stop was broadcast,
-      // the stop is outdated. sessionId is Date.now() when stop was sent.
-      // _playStartedAt is set when we receive 'play' command.
-      if (msg.sessionId && window._playStartedAt && window._playStartedAt > msg.sessionId) {
-        break; // our play is newer than this stop — ignore it
-      }
       playing = false; paused = false; startTime = null;
       stopAdaptiveSyncLoop();
       stopNode();
