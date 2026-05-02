@@ -1347,7 +1347,7 @@ function startAnim() {
   (function tick() {
     if (!playing || paused || startTime === null) return;
     const t = (serverNow() - startTime) / 1000;
-    const PRE = 0.5; // seconds before timing to start glow
+    const PRE = 1.0; // seconds before timing to start glow
     for (let i = 0; i < wordSpans.length; i++) {
       const w = lyrics[i];
       if (!w) continue;
