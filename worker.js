@@ -163,8 +163,11 @@ export class KaraokeRoom {
     if (this.playing && !this.paused && this.startTime !== null) {
       session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio }));
     } else if (this.playing && this.paused) {
-      session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio }));
-      session.ws.send(JSON.stringify({ type: 'pause', pauseTime: this.pauseTime }));
+      // Send play+paused atomically in one message to avoid client starting audio
+      session.ws.send(JSON.stringify({
+        type: 'play', startTime: this.startTime, song: this.song,
+        syncAudio: this.syncAudio, alreadyPaused: true, pauseTime: this.pauseTime
+      }));
     }
     if (!this.playing && this.syncAudio) {
       session.ws.send(JSON.stringify({ type: 'sync_audio', enabled: true, song: this.song }));
@@ -242,12 +245,6 @@ export class KaraokeRoom {
         this.volume = Math.max(0, Math.min(1, msg.volume ?? 0.8));
         // Broadcast to all including host so UI stays in sync
         this.broadcast({ type: 'set_volume', volume: this.volume });
-        break;
-
-      case 'state_check':
-        // Client asks for current state — resend full state.
-        // Recovers from missed stop/play/volume commands due to network issues.
-        this.finalizeJoin(session);
         break;
 
       case 'debug_log':
