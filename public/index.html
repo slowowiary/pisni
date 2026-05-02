@@ -207,23 +207,26 @@
     .word::after {
       content: '';
       position: absolute;
-      inset: -4px -14px;          /* більший відступ — більше місця для розмиття */
-      border-radius: 8px;
-      background: rgba(100, 200, 255, 0.0);
-      /* більший blur = м'якіший перехід до прозорого */
-      filter: blur(14px);
+      /* tight fit — тільки навколо самих букв, не виходить далеко */
+      inset: 0px -3px;
+      border-radius: 4px;
+      background: rgba(120, 210, 255, 0.0);
+      /* малий blur — м'які краї але пляма не розповзається */
+      filter: blur(4px);
       transition: background 1.2s ease;
       pointer-events: none;
-      z-index: -1;
+      /* не -1 щоб не проглядали білі фони сусідніх слів */
+      z-index: 0;
     }
+    /* текст поверх свічення */
+    .word { isolation: isolate; }
     .word.done { color: #888; }
-    .word.done::after { background: rgba(100, 200, 255, 0.0); }
+    .word.done::after { background: rgba(120, 210, 255, 0.0); }
     .word.pre-active::after {
-      background: rgba(150, 225, 255, 0.22);
+      background: rgba(120, 210, 255, 0.35);
     }
-    /* active: тільки підсвітлення, колір тексту не змінюється */
     .word.active::after {
-      background: rgba(150, 225, 255, 0.55);
+      background: rgba(120, 210, 255, 0.70);
     }
 
     /* ── Список пісень ──────────────────────────────────────── */
