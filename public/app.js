@@ -816,15 +816,19 @@ function updateScroll() {
   // fraction: 0 = top of visible area, 1 = bottom
   const fraction = Math.max(0, Math.min(1, relPos / containerH));
 
-  // No scroll needed when word is in upper quarter
-  if (fraction < 0.15) return;
+  // Start scrolling when word passes 20% mark
+  if (fraction < 0.20) return;
 
-  // Target: keep word at 25% from top
-  const newTarget = Math.max(0, wordTop - containerH * 0.25);
+  // Target: keep word at 20% from top (near second line)
+  const newTarget = Math.max(0, wordTop - containerH * 0.20);
 
-  // Speed curve: urgency = fraction² × 0.30
-  // fraction=0.30 → 0.027, fraction=0.50 → 0.075, fraction=1.0 → 0.30 (max)
-  const urgency = fraction * fraction * 0.30;
+  // Linear curve starting from 0 at fraction=0.20, reaching 0.06 at fraction=1.0
+  // At fraction=0.30 → 0.006 (barely moves)
+  // At fraction=0.50 → 0.018 (gentle)
+  // At fraction=0.75 → 0.033 (moderate)
+  // At fraction=1.00 → 0.06 (max — slow but steady)
+  const excess = fraction - 0.20; // 0..0.8
+  const urgency = excess * 0.075; // max = 0.8 * 0.075 = 0.06
 
   targetScrollY = targetScrollY + (newTarget - targetScrollY) * urgency;
 }
