@@ -198,21 +198,35 @@
       padding: 0 2px;
       /* плавна поява/зникнення жовтого фону */
       background-color: transparent;
-      /* маска: центр непрозорий, краї плавно зникають */
-      -webkit-mask-image: linear-gradient(to right, transparent 0%, black 22%, black 78%, transparent 100%);
-      mask-image: linear-gradient(to right, transparent 0%, black 22%, black 78%, transparent 100%);
-      transition: background-color 1.2s ease, color 0.4s ease;
+      position: relative;
+      transition: color 0.4s ease;
     }
+    /* резервує місце для жирного тексту щоб ширина не стрибала */
     .word::before { content: attr(data-word); display: block; font-weight: 700; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
-    .word.done   { color: #666; background-color: transparent; }
-    /* pre-active: слабкий фон за 1s до таймінгу */
-    .word.pre-active {
-      background-color: rgba(100, 200, 255, 0.15);
+    /* розмитий фон через псевдоелемент — не торкається тексту */
+    .word::after {
+      content: '';
+      position: absolute;
+      inset: -4px -10px;          /* виходить за межі слова з усіх боків */
+      border-radius: 50%;         /* робить форму овалу — без гострих кутів */
+      background: rgba(100, 200, 255, 0.0);
+      filter: blur(6px);
+      transition: background 1.2s ease;
+      pointer-events: none;
+      z-index: -1;
     }
-    /* active: повна яскравість, краї зникають через маску */
+    .word.done   { color: #666; }
+    .word.done::after { background: rgba(100, 200, 255, 0.0); }
+    /* pre-active: слабкий розмитий ореол за 1s до таймінгу */
+    .word.pre-active::after {
+      background: rgba(100, 200, 255, 0.30);
+    }
+    /* active: яскравий розмитий ореол */
     .word.active {
       color: #003a5c;
-      background-color: rgba(100, 200, 255, 0.50);
+    }
+    .word.active::after {
+      background: rgba(100, 200, 255, 0.65);
     }
 
     /* ── Список пісень ──────────────────────────────────────── */
