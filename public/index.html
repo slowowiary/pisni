@@ -207,11 +207,11 @@
     .word::after {
       content: '';
       position: absolute;
-      inset: -3px -8px;
-      border-radius: 6px;
+      inset: -4px -14px;          /* більший відступ — більше місця для розмиття */
+      border-radius: 8px;
       background: rgba(100, 200, 255, 0.0);
-      /* blur розмиває краї, але форма лишається прямокутною */
-      filter: blur(8px);
+      /* більший blur = м'якіший перехід до прозорого */
+      filter: blur(14px);
       transition: background 1.2s ease;
       pointer-events: none;
       z-index: -1;
