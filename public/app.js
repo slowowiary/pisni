@@ -612,8 +612,9 @@ async function adaptiveSyncLoop() {
   const prevOffset  = syncState.lastOffset ?? offset;
   const offsetJump  = Math.abs(offset - prevOffset);
   syncState.lastOffset = offset;
-  const isNoisy    = (offsetJump > 20 && syncState.driftHistory.length > 0)
-                  || (absDrift > 80 && syncState.stableCount > 3);
+  // Only offset jump is a reliable noise signal.
+  // absDrift > 80 was incorrectly filtering real large drifts as noise.
+  const isNoisy    = (offsetJump > 20 && syncState.driftHistory.length > 0);
   if (!isNoisy) {
     syncState.driftHistory.push({ drift, timestamp: Date.now() });
     if (syncState.driftHistory.length > 8) syncState.driftHistory.shift();
@@ -661,13 +662,18 @@ async function adaptiveSyncLoop() {
   const absSmoothed = Math.abs(smoothedDrift);
 
   if (DEBUG_SYNC) {
-    const _decision = absSmoothed < 15 ? 'idle'
+    const _needsAct = absSmoothed >= 15 || Math.abs(drift) > 40;
+    const _decision = !_needsAct ? 'idle'
       : (syncState.pendingRestart ? 'restart(pending)' : 'restart(first)');
     _dbg.log(`${((Date.now()-_DBG_START)/1000).toFixed(1)}s [cycle] req | off=${offset.toFixed(1)} exp=${expected.toFixed(3)} act=${actualNow.toFixed(3)} drift=${drift.toFixed(1)} smd=${smoothedDrift.toFixed(1)} dRate=${driftRate.toFixed(2)} rate=${syncState.smoothedRate.toFixed(4)} dec=${_decision} stab=${requestState.stabilityScore} urg=${urgencyState.level|0}`);
     _dbg.scheduleUiUpdate();
   }
 
-  if (absSmoothed < 15) {
+  // Also trigger restart if raw drift is already large even if smd hasn't caught up.
+  // smd with 8-sample buffer lags 40-80s; raw drift > 40ms is immediately audible.
+  const needsAction = absSmoothed >= 15 || Math.abs(drift) > 40;
+
+  if (!needsAction) {
     // Dead zone — drift inaudible, slowly return rate to 1.0
     syncState.largeDriftCount = 0;
     syncState.pendingRestart  = false;
@@ -707,10 +713,11 @@ async function adaptiveSyncLoop() {
       // Fresh offset before restart — stale offset causes landing 50-100ms off
       await preSync();
       scheduleAudio();
-      // Set playbackRate based on driftRate to prevent same drift from accumulating again
-      const targetRate       = calcTargetRate(driftRate, smoothedDrift);
-      syncState.smoothedRate = Math.max(0.997, Math.min(1.003, targetRate));
-      applyPlaybackRate(syncState.smoothedRate);
+      // Reset rate to 1.0 after restart — pre-restart smoothedDrift is stale
+      // and calcTargetRate would push in the wrong direction.
+      // Next cycles will measure real post-restart drift and correct if needed.
+      syncState.smoothedRate = 1.0;
+      applyPlaybackRate(1.0);
 
     } else {
       // Cooldown active — wait, nudge slowly toward 1.0
