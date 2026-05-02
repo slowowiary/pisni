@@ -198,35 +198,32 @@
       padding: 0 2px;
       /* плавна поява/зникнення жовтого фону */
       background-color: transparent;
+      color: #444;
       position: relative;
       transition: color 0.4s ease;
     }
-    /* резервує місце для жирного тексту щоб ширина не стрибала */
     .word::before { content: attr(data-word); display: block; font-weight: 700; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
-    /* розмитий фон через псевдоелемент — не торкається тексту */
+    /* підсвітлення через псевдоелемент позаду тексту */
     .word::after {
       content: '';
       position: absolute;
-      inset: -4px -10px;          /* виходить за межі слова з усіх боків */
-      border-radius: 50%;         /* робить форму овалу — без гострих кутів */
+      inset: -3px -8px;
+      border-radius: 6px;
       background: rgba(100, 200, 255, 0.0);
-      filter: blur(6px);
+      /* blur розмиває краї, але форма лишається прямокутною */
+      filter: blur(8px);
       transition: background 1.2s ease;
       pointer-events: none;
       z-index: -1;
     }
-    .word.done   { color: #666; }
+    .word.done { color: #888; }
     .word.done::after { background: rgba(100, 200, 255, 0.0); }
-    /* pre-active: слабкий розмитий ореол за 1s до таймінгу */
     .word.pre-active::after {
-      background: rgba(100, 200, 255, 0.30);
+      background: rgba(100, 200, 255, 0.28);
     }
-    /* active: яскравий розмитий ореол */
-    .word.active {
-      color: #003a5c;
-    }
+    /* active: тільки підсвітлення, колір тексту не змінюється */
     .word.active::after {
-      background: rgba(100, 200, 255, 0.65);
+      background: rgba(100, 200, 255, 0.60);
     }
 
     /* ── Список пісень ──────────────────────────────────────── */
