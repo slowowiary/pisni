@@ -1618,15 +1618,12 @@ playBtn?.addEventListener('click', async () => {
   await preSync();
   // Guard against double-tap
   if (playing) return;
-  try { ws.send(JSON.stringify({ type: 'play', song })); } catch {}
-  // Host starts audio immediately without waiting for own broadcast.
-  // On bad network, broadcast may be delayed — host would stay silent
-  // while clients already play. Instead: host schedules audio right now
-  // using the startTime the server will set (now + 3000ms buffer).
-  // We optimistically set startTime = serverNow() + 3000ms, same as server.
-  // If broadcast arrives later with a slightly different startTime, doPlay
-  // will resync via adaptiveSyncLoop within the first few seconds.
+  // Set playing=true BEFORE ws.send — this prevents the race condition where
+  // server broadcast arrives back at host BEFORE doPlay() runs, causing
+  // case 'play' to trigger a second doPlay() simultaneously.
+  playing   = true;
   startTime = serverNow() + 3000;
+  try { ws.send(JSON.stringify({ type: 'play', song })); } catch {}
   await doPlay(song);
 });
 
