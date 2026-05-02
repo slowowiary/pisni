@@ -329,7 +329,23 @@ function serverNow() { return Date.now() + offset; }
 
 function addSample(srvTime, t0) {
   const rtt = Date.now() - t0;
-  clockSamples.push({ off: srvTime - (t0 + rtt / 2), rtt });
+  const rawOff = srvTime - (t0 + rtt / 2);
+
+  // Sanity check: offset > ±5 minutes is physically impossible (browser vs server)
+  // Discard the sample entirely — do not corrupt clockSamples with bad data
+  const MAX_OFFSET = 300000; // 5 minutes in ms
+  if (Math.abs(rawOff) > MAX_OFFSET) {
+    if (DEBUG_SYNC) _dbg.event('offset-BAD', `discarded rawOff=${rawOff.toFixed(0)}ms rtt=${rtt}ms`);
+    return;
+  }
+
+  // Also discard if RTT looks like a timeout (>2000ms) — server was unreachable
+  if (rtt > 2000) {
+    if (DEBUG_SYNC) _dbg.event('offset-BAD', `discarded rtt=${rtt}ms`);
+    return;
+  }
+
+  clockSamples.push({ off: rawOff, rtt });
   if (clockSamples.length > 12) clockSamples.shift();
   const sorted  = [...clockSamples].sort((a, b) => a.rtt - b.rtt);
   const use     = sorted.slice(0, Math.max(1, Math.floor(sorted.length * 0.7)));
@@ -337,16 +353,16 @@ function addSample(srvTime, t0) {
   let ws = 0, os = 0;
   for (const s of use) { const w = minRtt / s.rtt; ws += w; os += s.off * w; }
   const newOffset = os / ws;
+
   if (clockSamples.length <= 1) {
-    // Перший замір після скидання — довіряємо повністю (offset ще не має сенсу)
+    // First sample after reset — trust fully (no previous value to compare)
     const prevOff = offset;
     offset = newOffset;
     if (DEBUG_SYNC) _dbg.event('offset', `${prevOff.toFixed(1)}→${offset.toFixed(1)}ms (first)`);
   } else {
     const prevOff = offset;
-    // Один стабільний коефіцієнт 80/20 — передбачувано і достатньо
+    // EMA 80/20 with 40ms/step clamp
     const blended = offset * 0.8 + newOffset * 0.2;
-    // Clamp: не більше 40ms зміни за один крок — достатньо швидко для реального зсуву
     const step    = Math.max(-40, Math.min(40, blended - offset));
     offset        = offset + step;
     if (DEBUG_SYNC) {
@@ -372,7 +388,15 @@ async function syncOnEntry(id) {
 // під час відтворення скидання дасть різкий стрибок offset → хибний drift
 async function preSync() {
   if (DEBUG_SYNC) _dbg.event('preSync', `start offset=${offset.toFixed(1)}ms playing=${playing}`);
-  if (!playing) clockSamples = []; // скидаємо тільки на старті, не під час гри
+  // Reset clockSamples if offset is already corrupt (>5min) — bad samples must go
+  // Also reset on start (not playing) as before
+  if (!playing || Math.abs(offset) > 300000) {
+    clockSamples = [];
+    if (Math.abs(offset) > 300000) {
+      if (DEBUG_SYNC) _dbg.event('preSync', `offset corrupt, resetting clockSamples`);
+      offset = 0; // reset to neutral so first real sample lands cleanly
+    }
+  }
   for (let i = 0; i < 4; i++) {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
