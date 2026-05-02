@@ -109,7 +109,7 @@ export class KaraokeRoom {
         await this.state.storage.put('paused', false);
         await this.state.storage.delete('startTime');
         await this.state.storage.delete('pauseTime');
-        this.broadcast({ type: 'stop' });
+        this.broadcastRetry({ type: 'stop' });
       }
       return cors(json({ ok: true }));
     }
@@ -169,6 +169,13 @@ export class KaraokeRoom {
     if (!this.playing && this.syncAudio) {
       session.ws.send(JSON.stringify({ type: 'sync_audio', enabled: true, song: this.song }));
     }
+    // Always send current volume so reconnecting client gets correct level
+    session.ws.send(JSON.stringify({ type: 'set_volume', volume: this.volume ?? 0.8 }));
+    // If nothing is playing, explicitly tell client to stop
+    // (handles case where client missed a stop command due to network issues)
+    if (!this.playing) {
+      session.ws.send(JSON.stringify({ type: 'stop' }));
+    }
   }
 
   async onMessage(session, msg) {
@@ -195,7 +202,7 @@ export class KaraokeRoom {
         this.pauseTime = Date.now();
         await this.state.storage.put('paused',    true);
         await this.state.storage.put('pauseTime', this.pauseTime);
-        this.broadcast({ type: 'pause', pauseTime: this.pauseTime });
+        this.broadcastRetry({ type: 'pause', pauseTime: this.pauseTime });
         break;
 
       case 'resume':
@@ -216,7 +223,7 @@ export class KaraokeRoom {
         await this.state.storage.put('paused',  false);
         await this.state.storage.delete('startTime');
         await this.state.storage.delete('pauseTime');
-        this.broadcast({ type: 'stop' });
+        this.broadcastRetry({ type: 'stop' });
         break;
 
       case 'sync_audio':
@@ -234,13 +241,17 @@ export class KaraokeRoom {
         if (session.role !== 'host') return;
         this.volume = Math.max(0, Math.min(1, msg.volume ?? 0.8));
         // Broadcast to all including host so UI stays in sync
-        this.broadcast({ type: 'set_volume', volume: this.volume });
+        this.broadcastRetry({ type: 'set_volume', volume: this.volume });
+        break;
+
+      case 'state_check':
+        // Client asks for current state — resend full state.
+        // Recovers from missed stop/play/volume commands due to network issues.
+        this.finalizeJoin(session);
         break;
 
       case 'debug_log':
         // Debug logging support — used when DEBUG_SYNC=true in app.js
-        // Forwards client sync logs to host so all devices' logs appear in one panel.
-        // Safe to leave here: when DEBUG_SYNC=false, clients never send debug_log messages.
         if (session.role === 'host') return;
         for (const s of this.sessions) {
           if (s.role === 'host') {
@@ -253,11 +264,30 @@ export class KaraokeRoom {
 
   onClose(session) {
     this.sessions = this.sessions.filter(s => s !== session);
+    // If host disconnected — stop playback for everyone
+    if (session.role === 'host' && this.playing) {
+      this.playing = false; this.paused = false;
+      this.startTime = null; this.pauseTime = null;
+      this.state.storage.put('playing', false);
+      this.state.storage.put('paused', false);
+      this.state.storage.delete('startTime');
+      this.state.storage.delete('pauseTime');
+      this.broadcastRetry({ type: 'stop' });
+    }
   }
 
   broadcast(msg) {
     const raw = JSON.stringify(msg);
     for (const s of this.sessions) { try { s.ws.send(raw); } catch {} }
+  }
+
+  // Broadcast with retry — for critical commands that must reach all clients.
+  // Sends 3 times: immediately, after 3s, after 7s (total window ~10s).
+  // Harmless if received multiple times — clients handle idempotently.
+  broadcastRetry(msg) {
+    this.broadcast(msg);
+    setTimeout(() => this.broadcast(msg), 3000);
+    setTimeout(() => this.broadcast(msg), 7000);
   }
 }
 
