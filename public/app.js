@@ -793,6 +793,7 @@ function startScroll() {
   (function tick() {
     const diff = targetScrollY - currentScrollY;
     if (Math.abs(diff) > 0.5) {
+      // Speed proportional to distance — naturally eases in and out
       currentScrollY += diff * 0.04;
       if (lyricsEl) lyricsEl.style.transform = `translateY(${-currentScrollY}px)`;
     }
@@ -808,7 +809,29 @@ function updateScroll() {
   if (!lyricsCont || !lyricsEl) return;
   const active = lyricsEl.querySelector('.word.active');
   if (!active) return;
-  targetScrollY = Math.max(0, active.offsetTop - lyricsCont.clientHeight * 0.4);
+  const containerH = lyricsCont.clientHeight;
+  const wordTop    = active.offsetTop; // position of active word in lyrics element
+  const relPos     = wordTop - currentScrollY; // position relative to visible area top
+
+  // How far down the word is as a fraction of container height (0=top, 1=bottom)
+  const fraction = relPos / containerH;
+
+  // Target: keep word near top quarter of container.
+  // The lower the word is (larger fraction), the more aggressively we scroll it up.
+  // When fraction < 0.25 — word is near top, no need to move much
+  // When fraction > 0.25 — start pulling up, speed increases with position
+  let targetFraction;
+  if (fraction <= 0.15) {
+    targetFraction = 0.15; // already near top, keep it there
+  } else {
+    // Gradually pull word toward 15% from top, proportional to how low it is
+    targetFraction = 0.15;
+  }
+
+  const newTarget = Math.max(0, wordTop - containerH * targetFraction);
+  // Blend toward new target — more urgently when word is lower
+  const urgency = Math.max(0.3, Math.min(1.0, fraction * 1.5));
+  targetScrollY = targetScrollY + (newTarget - targetScrollY) * urgency;
 }
 
 // =============================================================================
