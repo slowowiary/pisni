@@ -198,21 +198,21 @@
       padding: 0 2px;
       /* плавна поява/зникнення жовтого фону */
       background-color: transparent;
-      box-shadow: 0 0 0px 0px transparent;
-      transition: background-color 1.2s ease, color 0.4s ease, box-shadow 1.2s ease;
+      /* маска: центр непрозорий, краї плавно зникають */
+      -webkit-mask-image: linear-gradient(to right, transparent 0%, black 22%, black 78%, transparent 100%);
+      mask-image: linear-gradient(to right, transparent 0%, black 22%, black 78%, transparent 100%);
+      transition: background-color 1.2s ease, color 0.4s ease;
     }
     .word::before { content: attr(data-word); display: block; font-weight: 700; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
-    .word.done   { color: #666; background-color: transparent; box-shadow: 0 0 0px 0px transparent; }
-    /* pre-active: фон починає проявлятись за 0.5s до таймінгу */
+    .word.done   { color: #666; background-color: transparent; }
+    /* pre-active: слабкий фон за 1s до таймінгу */
     .word.pre-active {
-      background-color: rgba(100, 200, 255, 0.12);
-      box-shadow: 0 0 10px 6px rgba(100, 200, 255, 0.08);
+      background-color: rgba(100, 200, 255, 0.15);
     }
-    /* active: повна яскравість з розмитими краями */
+    /* active: повна яскравість, краї зникають через маску */
     .word.active {
       color: #003a5c;
-      background-color: rgba(100, 200, 255, 0.45);
-      box-shadow: 0 0 14px 8px rgba(100, 200, 255, 0.25);
+      background-color: rgba(100, 200, 255, 0.50);
     }
 
     /* ── Список пісень ──────────────────────────────────────── */
