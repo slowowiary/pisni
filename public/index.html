@@ -193,11 +193,13 @@
     }
     .word {
       display: inline-block;
-      color: #444;
+      color: #333;
       font-weight: 400;
       padding: 0 2px;
       position: relative;
-      /* плавне світіння самих букв через text-shadow */
+      /* тонка біла обводка навколо кожної букви */
+      -webkit-text-stroke: 0.5px rgba(255, 255, 255, 0.9);
+      paint-order: stroke fill;
       text-shadow: none;
       transition: color 0.4s ease, text-shadow 1.2s ease;
     }
@@ -211,11 +213,11 @@
     }
     .word.active {
       text-shadow:
-        0 0 8px rgba(255, 110, 110, 0.65),
-        0 0 20px rgba(255, 110, 110, 0.45),
-        0 0 40px rgba(255, 110, 110, 0.25),
-        0 0 70px rgba(255, 110, 110, 0.12),
-        0 0 100px rgba(255, 110, 110, 0.06);
+        0 0 8px rgba(255, 120, 120, 0.55),
+        0 0 20px rgba(255, 120, 120, 0.35),
+        0 0 40px rgba(255, 120, 120, 0.20),
+        0 0 70px rgba(255, 120, 120, 0.10),
+        0 0 100px rgba(255, 120, 120, 0.05);
     }
 
     /* ── Список пісень ──────────────────────────────────────── */
