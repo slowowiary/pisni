@@ -1177,6 +1177,16 @@ window.addEventListener('beforeunload', () => {
 });
 
 // =============================================================================
+// Periodic state check — catch missed commands (stop/play/volume) due to bad network
+// =============================================================================
+setInterval(async () => {
+  if (!roomId || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (role === 'host') return; // host is the source of truth
+  // Ask server for current state — it will resend if we're out of sync
+  ws.send(JSON.stringify({ type: 'state_check' }));
+}, 15000);
+
+// =============================================================================
 // Join / Create
 // =============================================================================
 if (joinBtn) {
@@ -1238,6 +1248,11 @@ function connectWS(id) {
 
   ws.addEventListener('close', () => {
     setStatus('Перепідключення…');
+    // Stop audio immediately when connection drops — server will resend play if needed
+    if (playing && !paused && role !== 'host') {
+      stopNode();
+      stopAdaptiveSyncLoop();
+    }
     setTimeout(() => connectWS(id), 2000);
   });
 }
