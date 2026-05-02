@@ -168,17 +168,17 @@
     /* ── Блок субтитрів ─────────────────────────────────────── */
     #lyrics-container {
       width: 100%; max-width: 720px;
-      height: 320px;
+      height: 420px;
       overflow: hidden;
       position: relative;
       background: #fff;
       border: 1px solid #dde3ff;
       border-radius: 12px;
-      padding: 1.2rem 1.8rem;
+      padding: 2.8rem 1.8rem;
     }
     #lyrics-container::before,
     #lyrics-container::after {
-      content: ''; position: absolute; left: 0; right: 0; height: 48px;
+      content: ''; position: absolute; left: 0; right: 0; height: 72px;
       pointer-events: none; z-index: 2;
     }
     #lyrics-container::before { top: 0;    background: linear-gradient(#fff, transparent); }
@@ -205,15 +205,17 @@
     .word.done { color: #888; text-shadow: none; }
     .word.pre-active {
       text-shadow:
-        0 0 10px rgba(255, 60, 60, 0.40),
-        0 0 22px rgba(255, 60, 60, 0.20);
+        0 0 12px rgba(255, 60, 60, 0.45),
+        0 0 28px rgba(255, 60, 60, 0.25),
+        0 0 50px rgba(255, 60, 60, 0.12);
     }
     .word.active {
       text-shadow:
-        0 0 8px rgba(255, 60, 60, 0.75),
-        0 0 18px rgba(255, 60, 60, 0.50),
-        0 0 35px rgba(255, 60, 60, 0.25),
-        0 0 55px rgba(255, 60, 60, 0.10);
+        0 0 8px rgba(255, 60, 60, 0.80),
+        0 0 20px rgba(255, 60, 60, 0.60),
+        0 0 40px rgba(255, 60, 60, 0.35),
+        0 0 70px rgba(255, 60, 60, 0.18),
+        0 0 100px rgba(255, 60, 60, 0.08);
     }
 
     /* ── Список пісень ──────────────────────────────────────── */
