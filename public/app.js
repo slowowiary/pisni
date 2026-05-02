@@ -976,15 +976,17 @@ document.addEventListener('visibilitychange', async () => {
 // =============================================================================
 function startScroll() {
   stopScroll();
-  (function tick() {
+  let _lastScrollUpdate = 0;
+  (function tick(ts) {
     const diff = targetScrollY - currentScrollY;
-    if (Math.abs(diff) > 0.5) {
-      // Speed proportional to distance — naturally eases in and out
+    // Only update DOM when movement is meaningful AND throttle to ~30fps on slow devices
+    if (Math.abs(diff) > 0.5 && (ts - _lastScrollUpdate) > 16) {
       currentScrollY += diff * 0.04;
       if (lyricsEl) lyricsEl.style.transform = `translateY(${-currentScrollY}px)`;
+      _lastScrollUpdate = ts;
     }
     scrollFrame = requestAnimationFrame(tick);
-  })();
+  })(0);
 }
 function stopScroll() { if (scrollFrame) { cancelAnimationFrame(scrollFrame); scrollFrame = null; } }
 function resetScroll() {
@@ -1607,20 +1609,20 @@ function startAnim() {
   (function tick() {
     if (!playing || paused || startTime === null) return;
     const t = (serverNow() - startTime) / 1000;
-    const PRE = 1.0; // seconds before timing to start glow
+    const PRE = 1.0;
     for (let i = 0; i < wordSpans.length; i++) {
       const w = lyrics[i];
       if (!w) continue;
       const active    = t >= w.start && t < w.end;
       const done      = t >= w.end && !active;
-      // pre-active: starts PRE seconds before word timing, ends when active begins
       const preActive = !active && !done && t >= (w.start - PRE) && t < w.start;
       wordSpans[i].classList.toggle('active',     active);
       wordSpans[i].classList.toggle('pre-active', preActive);
       wordSpans[i].classList.toggle('done',       done);
     }
     updateScroll();
-    animFrame = requestAnimationFrame(tick);
+    // Throttle to ~30fps on slow devices: skip every other frame
+    animFrame = requestAnimationFrame(() => requestAnimationFrame(tick));
   })();
 }
 function stopAnim() { if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; } }
