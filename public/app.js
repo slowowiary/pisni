@@ -4,6 +4,160 @@
 const WORKER_URL = 'https://pisni.slovo-wiry.workers.dev';
 'use strict';
 
+// =============================================================================
+// DEBUG SYNC SYSTEM
+// Set DEBUG_SYNC = true to enable. Zero overhead when false.
+// =============================================================================
+const DEBUG_SYNC = true;
+const _DBG_START  = Date.now(); // session start for external timestamp use
+
+const _dbg = (() => {
+  if (!DEBUG_SYNC) {
+    // Return no-op stubs — no overhead
+    const noop = () => {};
+    return { log: noop, event: noop, initPanel: noop };
+  }
+
+  const MAX_ENTRIES  = 1000;
+  const SESSION_START = Date.now();
+  const buffer       = [];
+  let   panelEl      = null;
+  let   panelBody    = null;
+  let   uiTimer      = null;
+
+  function ts() {
+    const s = ((Date.now() - SESSION_START) / 1000).toFixed(1);
+    return `+${s}s`;
+  }
+
+  function log(line) {
+    buffer.push(line);
+    if (buffer.length > MAX_ENTRIES) buffer.shift();
+  }
+
+  function event(label, data) {
+    const parts = [ts(), `[${label}]`];
+    if (data) parts.push(data);
+    log(parts.join(' '));
+  }
+
+  function scheduleUiUpdate() {
+    if (uiTimer || !panelBody) return;
+    uiTimer = setTimeout(() => {
+      uiTimer = null;
+      if (!panelBody) return;
+      const last50 = buffer.slice(-50).join('\n');
+      panelBody.textContent = last50;
+      panelBody.scrollTop   = panelBody.scrollHeight;
+    }, 1000);
+  }
+
+  function initPanel() {
+    if (panelEl) return;
+
+    panelEl = document.createElement('div');
+    Object.assign(panelEl.style, {
+      position:   'fixed',
+      bottom:     '0',
+      right:      '0',
+      width:      '340px',
+      height:     '220px',
+      background: 'rgba(0,0,0,0.88)',
+      color:      '#0f0',
+      fontSize:   '10px',
+      fontFamily: 'monospace',
+      zIndex:     '99999',
+      display:    'flex',
+      flexDirection: 'column',
+      borderTopLeftRadius: '6px',
+      overflow:   'hidden',
+    });
+
+    // Header bar
+    const header = document.createElement('div');
+    Object.assign(header.style, {
+      display:    'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      padding:    '3px 6px',
+      background: 'rgba(0,255,0,0.15)',
+      flexShrink: '0',
+    });
+    header.innerHTML = '<span>⚡ sync debug</span>';
+
+    const btnRow = document.createElement('div');
+    btnRow.style.display = 'flex';
+    btnRow.style.gap     = '4px';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.textContent = 'Copy';
+    Object.assign(copyBtn.style, {
+      fontSize:   '9px',
+      padding:    '1px 5px',
+      cursor:     'pointer',
+      background: '#1a1',
+      color:      '#fff',
+      border:     'none',
+      borderRadius: '3px',
+    });
+    copyBtn.onclick = () => {
+      navigator.clipboard.writeText(buffer.join('\n'))
+        .then(() => { copyBtn.textContent = 'Copied!'; setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500); })
+        .catch(() => { copyBtn.textContent = 'Error'; });
+    };
+
+    const clearBtn = document.createElement('button');
+    clearBtn.textContent = 'Clear';
+    Object.assign(clearBtn.style, {
+      fontSize:   '9px',
+      padding:    '1px 5px',
+      cursor:     'pointer',
+      background: '#441',
+      color:      '#fff',
+      border:     'none',
+      borderRadius: '3px',
+    });
+    clearBtn.onclick = () => { buffer.length = 0; if (panelBody) panelBody.textContent = ''; };
+
+    const hideBtn = document.createElement('button');
+    hideBtn.textContent = '✕';
+    Object.assign(hideBtn.style, {
+      fontSize:   '9px',
+      padding:    '1px 5px',
+      cursor:     'pointer',
+      background: 'transparent',
+      color:      '#888',
+      border:     'none',
+    });
+    hideBtn.onclick = () => { panelEl.style.display = 'none'; };
+
+    btnRow.appendChild(copyBtn);
+    btnRow.appendChild(clearBtn);
+    btnRow.appendChild(hideBtn);
+    header.appendChild(btnRow);
+
+    // Log body
+    panelBody = document.createElement('pre');
+    Object.assign(panelBody.style, {
+      flex:       '1',
+      margin:     '0',
+      padding:    '4px 6px',
+      overflowY:  'auto',
+      overflowX:  'hidden',
+      whiteSpace: 'pre-wrap',
+      wordBreak:  'break-all',
+      fontSize:   '9.5px',
+    });
+
+    panelEl.appendChild(header);
+    panelEl.appendChild(panelBody);
+    document.body.appendChild(panelEl);
+  }
+
+  return { log, event, scheduleUiUpdate, initPanel };
+})();
+
+
 // ── Стан ─────────────────────────────────────────────────────────────────────
 let ws             = null;
 let role           = null;   // 'host' | 'participant'
@@ -134,6 +288,7 @@ async function scheduleAudio() {
   gainNode.gain.value = isMuted ? 0 : 1;
   src.connect(gainNode);
   src.start(when, off);
+  if (DEBUG_SYNC) _dbg.event('scheduleAudio', `off=${off.toFixed(3)}s when=${when.toFixed(3)} startTime=${startTime} offset=${offset.toFixed(1)}ms`);
   sourceNode = src;
   src.onended = () => {
     if (sourceNode === src) { sourceNode = null; if (role === 'host' && playing) songEnded(); }
@@ -174,13 +329,20 @@ function addSample(srvTime, t0) {
   const newOffset = os / ws;
   if (clockSamples.length <= 1) {
     // Перший замір після скидання — довіряємо повністю (offset ще не має сенсу)
+    const prevOff = offset;
     offset = newOffset;
+    if (DEBUG_SYNC) _dbg.event('offset', `${prevOff.toFixed(1)}→${offset.toFixed(1)}ms (first)`);
   } else {
+    const prevOff = offset;
     // Один стабільний коефіцієнт 80/20 — передбачувано і достатньо
     const blended = offset * 0.8 + newOffset * 0.2;
     // Clamp: не більше 40ms зміни за один крок — достатньо швидко для реального зсуву
     const step    = Math.max(-40, Math.min(40, blended - offset));
     offset        = offset + step;
+    if (DEBUG_SYNC) {
+      const delta = offset - prevOff;
+      if (Math.abs(delta) > 1) _dbg.event('offset', `${prevOff.toFixed(1)}→${offset.toFixed(1)}ms (Δ${delta > 0 ? '+' : ''}${delta.toFixed(1)})`);
+    }
   }
 }
 
@@ -199,6 +361,7 @@ async function syncOnEntry(id) {
 // Скидаємо clockSamples тільки якщо музика не грає —
 // під час відтворення скидання дасть різкий стрибок offset → хибний drift
 async function preSync() {
+  if (DEBUG_SYNC) _dbg.event('preSync', `start offset=${offset.toFixed(1)}ms playing=${playing}`);
   if (!playing) clockSamples = []; // скидаємо тільки на старті, не під час гри
   for (let i = 0; i < 4; i++) {
     const t0  = Date.now();
@@ -209,6 +372,7 @@ async function preSync() {
     }
     if (i < 3) await new Promise(r => setTimeout(r, 30));
   }
+  if (DEBUG_SYNC) _dbg.event('preSync', `end offset=${offset.toFixed(1)}ms`);
 }
 
 // Поточна позиція відтворення в секундах
@@ -356,6 +520,15 @@ async function adaptiveSyncLoop() {
   const forcedRequest    = Math.abs(smoothedForForce) > 30;
 
   if (!shouldRequest(forcedRequest)) {
+    if (DEBUG_SYNC) {
+      const _act = getActualPos();
+      const _exp = startTime !== null ? (serverNow() - startTime) / 1000 : 0;
+      const _d   = _act !== null ? ((_act - _exp) * 1000).toFixed(1) : 'n/a';
+      const _sd  = syncState.driftHistory.length > 0
+        ? _weightedAverage(syncState.driftHistory.map(h => h.drift)).toFixed(1) : '—';
+      _dbg.log(`${((Date.now()-_DBG_START)/1000).toFixed(1)}s [cycle] no-req | drift=${_d} smd=${_sd} rate=${syncState.smoothedRate.toFixed(4)} stab=${requestState.stabilityScore} urg=${urgencyState.level|0}`);
+      _dbg.scheduleUiUpdate();
+    }
     localCorrection();
     scheduleNext();
     return;
@@ -428,8 +601,10 @@ async function adaptiveSyncLoop() {
   } else {
     // Навіть при шумному вимірі — дуже повільне повернення rate до 1.0
     // Запобігає "замороженню" корекції на ненульовому значенні
+    if (DEBUG_SYNC) _dbg.log(`${((Date.now()-_DBG_START)/1000).toFixed(1)}s [cycle] NOISY | expJump=${expJump.toFixed(1)} drift=${drift.toFixed(1)} rate=${syncState.smoothedRate.toFixed(4)}`);
     syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.02;
     applyPlaybackRate(syncState.smoothedRate);
+    if (DEBUG_SYNC) _dbg.scheduleUiUpdate();
     scheduleNext();
     return;
   }
@@ -437,6 +612,14 @@ async function adaptiveSyncLoop() {
   // Рішення приймаємо за smoothedDrift (згладжений), не за сирим drift
   // Один шумний вимір не змінить smoothedDrift суттєво
   const absSmoothed = Math.abs(smoothedDrift);
+
+  if (DEBUG_SYNC) {
+    const _decision = absSmoothed < 15 ? 'idle'
+      : absSmoothed <= 40 ? 'rate'
+      : (syncState.pendingRestart ? 'large(pending)' : 'large(first)');
+    _dbg.log(`${((Date.now()-_DBG_START)/1000).toFixed(1)}s [cycle] req | off=${offset.toFixed(1)} exp=${expected.toFixed(3)} act=${actualNow.toFixed(3)} drift=${drift.toFixed(1)} smd=${smoothedDrift.toFixed(1)} dRate=${driftRate.toFixed(2)} rate=${syncState.smoothedRate.toFixed(4)} dec=${_decision} stab=${requestState.stabilityScore} urg=${urgencyState.level|0}`);
+    _dbg.scheduleUiUpdate();
+  }
 
   if (absSmoothed < 15) {
     // Мертва зона — дуже повільно до 1.0
@@ -480,6 +663,7 @@ async function adaptiveSyncLoop() {
         urgencyState.level          = Math.min(100, urgencyState.level + 40);
         requestState.stabilityScore = Math.max(0, requestState.stabilityScore - 20);
         syncState.smoothedRate = 1.0;
+        if (DEBUG_SYNC) _dbg.event('RESTART', `smd=${smoothedDrift.toFixed(1)}ms drift=${drift.toFixed(1)}ms offset=${offset.toFixed(1)}ms`);
         scheduleAudio();
         applyPlaybackRate(1.0);
       } else {
@@ -768,6 +952,7 @@ async function handleMsg(msg) {
       // Не додаємо зразок з joined — RTT WebSocket невідомий, фіктивне 30ms спотворює offset
 
       if (role === 'host') {
+        if (DEBUG_SYNC) { _dbg.event('role', 'host — debug panel init'); _dbg.initPanel(); }
         joinScreen.hidden = true;
         buildSongList();
         songPicker.hidden = false;
