@@ -464,17 +464,23 @@ function shouldRequest(forcedByDrift) {
   return elapsed >= _jitter(base);
 }
 
-function calcTargetRate(driftRate) {
-  // Корекція тільки від швидкості зміни дрейфу (ms/sec), не від абсолютного drift
-  // driftRate > 0 → клієнт все більше випереджає → треба сповільнити
-  // driftRate < 0 → клієнт все більше відстає   → треба прискорити
-  // Множник 0.00005: при driftRate = 10ms/s корекція = 0.05% — майже непомітно
-  const raw        = -(driftRate * 0.00005);
-  const correction = Math.max(-0.005, Math.min(0.005, raw)); // clamp ±0.5%
+function calcTargetRate(driftRate, smoothedDrift) {
+  // Primary: driftRate contribution — reacts to growing drift
+  // At driftRate=10ms/s → correction=0.05% (inaudible)
+  const rateRaw  = -(driftRate * 0.00005);
+
+  // Secondary: weak direct smoothedDrift term — closes stable non-zero offset
+  // At smoothedDrift=20ms → correction=0.001 (closes 20ms gap in ~2 minutes)
+  // At smoothedDrift=5ms  → correction=0.00025 (below dead zone, ignored)
+  // This is intentionally tiny — avoids oscillation, just prevents permanent drift
+  const driftRaw = -(smoothedDrift * 0.00005);
+
+  const correction = Math.max(-0.005, Math.min(0.005, rateRaw + driftRaw));
   let   targetRate = 1.0 + correction;
-  // Мертва зона: корекція < 0.4% → встановлюємо рівно 1.0
-  // Уникає постійних мікроколивань від шуму вимірювань
-  if (Math.abs(targetRate - 1.0) < 0.004) targetRate = 1.0;
+
+  // Dead zone: correction < 0.1% → set exactly 1.0
+  // Reduced from 0.4% — that was too aggressive and suppressed valid corrections
+  if (Math.abs(targetRate - 1.0) < 0.001) targetRate = 1.0;
   return targetRate;
 }
 
@@ -639,7 +645,7 @@ async function adaptiveSyncLoop() {
     syncState.pendingRestart  = false;
     const inertia    = syncState.stableCount > 5 ? 0.04 : 0.08;
     syncState.stableCount = 0;
-    const targetRate = calcTargetRate(driftRate);
+    const targetRate = calcTargetRate(driftRate, smoothedDrift);
     syncState.smoothedRate = syncState.smoothedRate +
       (targetRate - syncState.smoothedRate) * inertia;
     applyPlaybackRate(syncState.smoothedRate);
@@ -667,6 +673,9 @@ async function adaptiveSyncLoop() {
         requestState.stabilityScore = Math.max(0, requestState.stabilityScore - 20);
         syncState.smoothedRate = 1.0;
         if (DEBUG_SYNC) _dbg.event('RESTART', `smd=${smoothedDrift.toFixed(1)}ms drift=${drift.toFixed(1)}ms offset=${offset.toFixed(1)}ms`);
+        // preSync before restart — refresh offset so new start position is accurate
+        // Without this, restart uses stale offset and lands 50-100ms off again
+        await preSync();
         scheduleAudio();
         applyPlaybackRate(1.0);
       } else {
@@ -955,7 +964,7 @@ async function handleMsg(msg) {
       // Не додаємо зразок з joined — RTT WebSocket невідомий, фіктивне 30ms спотворює offset
 
       if (role === 'host') {
-        if (DEBUG_SYNC) { _dbg.event('role', 'host — debug panel init'); _dbg.initPanel(); }
+        if (DEBUG_SYNC) { _dbg.event('role', 'host — debug panel'); _dbg.initPanel(); }
         joinScreen.hidden = true;
         buildSongList();
         songPicker.hidden = false;
@@ -973,6 +982,7 @@ async function handleMsg(msg) {
 
       } else {
         // Клієнт
+        if (DEBUG_SYNC) { _dbg.event('role', 'client — debug panel'); _dbg.initPanel(); }
         songPicker.hidden = true; playBtn.hidden = true;
         pauseBtn.hidden = true; syncLabel.hidden = true;
         lyricsCont.hidden = true;
