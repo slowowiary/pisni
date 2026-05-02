@@ -182,17 +182,19 @@ async function syncOnEntry(id) {
   }
 }
 
-// Легка синхронізація перед стартом аудіо — 2 заміри, 50ms між ними
-// Уточнює offset безпосередньо перед scheduleAudio() щоб старт був точним
+// Точна синхронізація перед стартом аудіо
+// Очищає старі зразки щоб старий RTT не впливав на offset
+// 4 заміри з паузою 30ms — достатньо точно, вкладається в 3с запас startTime
 async function preSync() {
-  for (let i = 0; i < 2; i++) {
+  clockSamples = []; // скидаємо старі зразки — свіжі точніші
+  for (let i = 0; i < 4; i++) {
     const t0  = Date.now();
     const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
     if (res?.ok) {
       addSample((await res.json()).serverTime, t0);
       requestState.lastRequestTime = Date.now();
     }
-    if (i < 1) await new Promise(r => setTimeout(r, 50));
+    if (i < 3) await new Promise(r => setTimeout(r, 30));
   }
 }
 
@@ -700,7 +702,7 @@ async function handleMsg(msg) {
     // ── Підключення ──────────────────────────────────────────────────────────
     case 'joined': {
       role = msg.role;
-      addSample(msg.serverTime, Date.now() - 30);
+      // Не додаємо зразок з joined — RTT WebSocket невідомий, фіктивне 30ms спотворює offset
 
       if (role === 'host') {
         joinScreen.hidden = true;
@@ -932,6 +934,9 @@ playBtn?.addEventListener('click', async () => {
     }
     playBtn.disabled = false;
   }
+  // preSync тут — щоб offset був свіжим ДО відправки команди
+  // Хост і клієнт матимуть менший розрив між своїми serverNow() в момент scheduleAudio()
+  await preSync();
   ws.send(JSON.stringify({ type: 'play', song }));
 });
 
