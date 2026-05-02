@@ -807,12 +807,33 @@ function releaseWakeLock() {
   if (role === 'host') return;
   if (wakeLock) { wakeLock.release(); wakeLock = null; }
 }
-document.addEventListener('visibilitychange', () => {
-  // Браузер скасовує wake lock при переході вкладки у фон —
-  // відновлюємо як тільки вкладка знову стає активною.
-  // Для хоста — завжди; для клієнта — тільки під час відтворення.
-  if (document.visibilityState !== 'visible') return;
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible') {
+    // Tab going to background — note the time so we know if AudioContext drifted
+    window._hiddenAt = Date.now();
+    return;
+  }
+
+  // Tab came back to foreground
   if (role === 'host' || (playing && !paused)) requestWakeLock();
+
+  // If audio was playing, AudioContext may have suspended while hidden.
+  // Regardless of audioCtx.state, resync position on return.
+  // This handles both iOS (ctx suspends) and Android (ctx may drift).
+  if (playing && !paused && syncAudioEnabled && audioUnlocked && audioBuffer && !isMuted) {
+    const hiddenMs = Date.now() - (window._hiddenAt || Date.now());
+    if (hiddenMs > 500) {
+      // Was hidden for more than 500ms — AudioContext may have drifted
+      if (DEBUG_SYNC) _dbg.event('visibility', `returned after ${hiddenMs}ms — resyncing`);
+      if (audioCtx && audioCtx.state === 'suspended') {
+        try { await audioCtx.resume(); } catch {}
+      }
+      syncState.driftHistory = [];
+      await preSync();
+      scheduleAudio();
+      startAdaptiveSyncLoop();
+    }
+  }
 });
 
 // =============================================================================
