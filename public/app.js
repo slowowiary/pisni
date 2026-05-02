@@ -398,7 +398,7 @@ const syncState = {
   largeDriftCount:    0,     // скільки разів поспіль drift > 40ms
   pendingRestart:     false, // перший великий drift → чекаємо підтвердження
   stableCount:        0,     // скільки разів поспіль drift < 15ms (інерція)
-  lastExpected:       null,  // попереднє expected — захист від стрибка offset
+  lastOffset:         null,  // попередній offset після запиту — для виявлення стрибків
 };
 
 const requestState = {
@@ -562,10 +562,13 @@ async function adaptiveSyncLoop() {
 
   // Захист від шумного виміру: якщо expected різко стрибнув або drift аномальний
   // — не додаємо в driftHistory, але продовжуємо цикл (не пропускаємо)
-  const prevExp    = syncState.lastExpected ?? expected;
-  const expJump    = Math.abs((expected - prevExp) * 1000);
-  syncState.lastExpected = expected;
-  const isNoisy    = (expJump > 20 && syncState.driftHistory.length > 0)
+  // Detect noisy measurement by comparing offset change between cycles,
+  // NOT expected change. expected grows naturally with time — comparing it
+  // always produces large "jumps". offset should be stable between cycles.
+  const prevOffset  = syncState.lastOffset ?? offset;
+  const offsetJump  = Math.abs(offset - prevOffset);
+  syncState.lastOffset = offset;
+  const isNoisy    = (offsetJump > 20 && syncState.driftHistory.length > 0)
                   || (absDrift > 80 && syncState.stableCount > 3);
   if (!isNoisy) {
     syncState.driftHistory.push({ drift, timestamp: Date.now() });
@@ -601,7 +604,7 @@ async function adaptiveSyncLoop() {
   } else {
     // Навіть при шумному вимірі — дуже повільне повернення rate до 1.0
     // Запобігає "замороженню" корекції на ненульовому значенні
-    if (DEBUG_SYNC) _dbg.log(`${((Date.now()-_DBG_START)/1000).toFixed(1)}s [cycle] NOISY | expJump=${expJump.toFixed(1)} drift=${drift.toFixed(1)} rate=${syncState.smoothedRate.toFixed(4)}`);
+    if (DEBUG_SYNC) _dbg.log(`${((Date.now()-_DBG_START)/1000).toFixed(1)}s [cycle] NOISY | offJump=${offsetJump.toFixed(1)} drift=${drift.toFixed(1)} rate=${syncState.smoothedRate.toFixed(4)}`);
     syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.02;
     applyPlaybackRate(syncState.smoothedRate);
     if (DEBUG_SYNC) _dbg.scheduleUiUpdate();
