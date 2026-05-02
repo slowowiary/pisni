@@ -229,6 +229,16 @@ export class KaraokeRoom {
           }
         }
         break;
+
+      case 'debug_log':
+        // Forward client debug logs to host only — no storage, no broadcast
+        if (session.role === 'host') return; // host doesn't send debug_log
+        for (const s of this.sessions) {
+          if (s.role === 'host') {
+            try { s.ws.send(JSON.stringify(msg)); } catch {}
+          }
+        }
+        break;
     }
   }
 
