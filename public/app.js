@@ -181,76 +181,256 @@ async function syncOnEntry(id) {
   }
 }
 
-// Послідовні заміри — повертає найкращий offset
-// Використовуємо паралельні + послідовні для швидкості та точності
-async function resync(count = 5) {
-  for (let i = 0; i < count; i++) {
-    const t0  = Date.now();
-    const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
-    if (res?.ok) addSample((await res.json()).serverTime, t0);
-    if (i < count - 1) await new Promise(r => setTimeout(r, 30));
-  }
-}
-
 // Поточна позиція відтворення в секундах
 function getActualPos() {
   if (!sourceNode || !audioCtx) return null;
   return sourceNode._off + (audioCtx.currentTime - sourceNode._when);
 }
 
-// Перевірка дрейфу і корекція якщо потрібно (ціль: < 20ms)
-async function checkAndCorrect() {
-  if (!playing || paused || startTime === null) return;
+// =============================================================================
+// Adaptive Predictive Sync
+// =============================================================================
+const SAFETY_OFFSET = 0.03; // 30ms — достатньо для інтернету
+
+const syncState = {
+  driftHistory:    [],
+  smoothedRate:    1.0,
+  skipNext:        false,
+  lastRestartTime: 0,
+  longTermDrift:   0,
+};
+
+const requestState = {
+  stabilityScore:  50,
+  lastDrift:       0,
+  lastRequestTime: 0,
+  minInterval:     5000,
+  maxInterval:     45000,
+};
+
+const urgencyState = {
+  level:         0,
+  lastSpikeTime: 0,
+};
+
+let syncLoopTimer = null;
+
+function _weightedAverage(values) {
+  let sum = 0, weightSum = 0;
+  values.forEach((v, i) => { const w = i + 1; sum += v * w; weightSum += w; });
+  return weightSum === 0 ? 0 : sum / weightSum;
+}
+function _jitter(interval) { return interval * (0.9 + Math.random() * 0.2); }
+
+function updateUrgency(drift, driftRate) {
+  const absDrift = Math.abs(drift);
+  const now      = Date.now();
+  if      (absDrift > 40) urgencyState.level += 50;
+  else if (absDrift > 20) urgencyState.level += 30;
+  else if (absDrift < 8)  urgencyState.level -= 10;
+  if (Math.abs(driftRate) > 2) {
+    urgencyState.level        += 10;
+    urgencyState.lastSpikeTime = now;
+  }
+  if (now - urgencyState.lastSpikeTime > 5000) urgencyState.level -= 5;
+  urgencyState.level = Math.max(0, Math.min(100, urgencyState.level));
+}
+
+function updateStability(drift, prevDrift) {
+  const absDrift   = Math.abs(drift);
+  const driftDelta = Math.abs(drift - prevDrift);
+  if      (absDrift < 8)  requestState.stabilityScore += 3;
+  else if (absDrift < 20) requestState.stabilityScore += 1;
+  else                    requestState.stabilityScore -= 15;
+  if (driftDelta > 10)    requestState.stabilityScore -= 5;
+  requestState.stabilityScore = Math.max(0, Math.min(100, requestState.stabilityScore));
+  requestState.lastDrift = drift;
+}
+
+function shouldRequest(forcedByDrift) {
+  if (forcedByDrift) return true;
+  const score   = requestState.stabilityScore;
+  const urgency = urgencyState.level;
+  // Жорстке блокування при високій стабільності і низькому urgency
+  if (score > 85 && urgency < 5) return false;
+  const elapsed        = Date.now() - requestState.lastRequestTime;
+  const effectiveScore = Math.max(0, Math.min(100, score - urgency));
+  const base           = requestState.minInterval +
+                         (requestState.maxInterval - requestState.minInterval) *
+                         (effectiveScore / 100);
+  return elapsed >= _jitter(base);
+}
+
+function calcTargetRate(smoothedDrift, driftRate) {
+  const timeToFix       = Math.max(2, Math.min(8,
+    Math.abs(smoothedDrift) / Math.max(Math.abs(driftRate), 0.001)
+  ));
+  const speedCorrection = smoothedDrift / timeToFix / 1000;
+  let   targetRate      = Math.max(0.95, Math.min(1.05, 1.0 - speedCorrection));
+  // Long-term drift — дуже слабкий внесок від накопиченого системного дрейфу
+  targetRate += syncState.longTermDrift * 0.000005;
+  targetRate  = Math.max(0.95, Math.min(1.05, targetRate));
+  // Dead zone — корекція < 0.3% не варта ризику артефактів
+  if (Math.abs(targetRate - 1.0) < 0.003) targetRate = 1.0;
+  return targetRate;
+}
+
+function applyPlaybackRate(rate) {
+  if (!sourceNode) return;
+  sourceNode.playbackRate.setTargetAtTime(rate, audioCtx.currentTime, 0.5);
+}
+
+function localCorrection() {
+  if (syncState.skipNext || !playing || paused || startTime === null) return;
+  const actual = getActualPos();
+  if (actual === null) return;
+  // Якщо offset застарів — тільки слабке повернення до 1.0
+  const isStale = (Date.now() - requestState.lastRequestTime) > 15000;
+  if (isStale) {
+    syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
+    applyPlaybackRate(syncState.smoothedRate);
+    return;
+  }
+  const expected = (serverNow() - startTime) / 1000;
+  const drift    = (actual - expected) * 1000;
+  const absDrift = Math.abs(drift);
+  if (absDrift < 8) {
+    syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.2;
+    applyPlaybackRate(syncState.smoothedRate);
+    return;
+  }
+  const history   = syncState.driftHistory;
+  const driftRate = history.length >= 2
+    ? (history[history.length-1].drift - history[0].drift) /
+      ((history[history.length-1].timestamp - history[0].timestamp) / 1000)
+    : 0;
+  const smoothedDrift    = history.length > 0
+    ? _weightedAverage(history.map(h => h.drift)) : drift;
+  const targetRate       = calcTargetRate(smoothedDrift, driftRate);
+  const lerpFactor       = Math.max(0.1, Math.min(0.35, absDrift / 40));
+  syncState.smoothedRate = syncState.smoothedRate + (targetRate - syncState.smoothedRate) * lerpFactor;
+  applyPlaybackRate(syncState.smoothedRate);
+}
+
+async function adaptiveSyncLoop() {
+  if (!playing || paused || startTime === null) { scheduleNext(); return; }
+  const actual = getActualPos();
+  if (actual === null) { scheduleNext(); return; }
+
+  const roughDrift       = (actual - (serverNow() - startTime) / 1000) * 1000;
+  const smoothedForForce = syncState.driftHistory.length > 0
+    ? _weightedAverage(syncState.driftHistory.map(h => h.drift)) : roughDrift;
+  const forcedRequest    = Math.abs(smoothedForForce) > 30;
+
+  if (!shouldRequest(forcedRequest)) {
+    localCorrection();
+    scheduleNext();
+    return;
+  }
+
+  // Один запит на сервер
   const t0  = Date.now();
   const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
-  if (!res?.ok) return;
+  if (!res?.ok) {
+    requestState.stabilityScore = Math.max(0, requestState.stabilityScore - 10);
+    urgencyState.level          = Math.min(100, urgencyState.level + 20);
+    localCorrection();
+    scheduleNext();
+    return;
+  }
   addSample((await res.json()).serverTime, t0);
-  const expected = (serverNow() - startTime) / 1000;
-  const actual   = getActualPos();
-  if (actual === null) { scheduleAudio(); return; }
-  const drift = Math.abs(actual - expected);
-  if (drift > 0.020) { // > 20ms — коригуємо (було 30ms)
-    scheduleAudio();
+  requestState.lastRequestTime = Date.now();
+
+  if (syncState.skipNext) { syncState.skipNext = false; scheduleNext(); return; }
+
+  // Offset щойно оновлений — isStale тут завжди false, але перевіряємо захисно
+  const isStale = (Date.now() - requestState.lastRequestTime) > 15000;
+  if (isStale) { scheduleNext(); return; }
+
+  const expected  = (serverNow() - startTime) / 1000;
+  const actualNow = getActualPos();
+  if (actualNow === null) { scheduleNext(); return; }
+
+  const drift    = (actualNow - expected) * 1000;
+  const absDrift = Math.abs(drift);
+
+  syncState.driftHistory.push({ drift, timestamp: Date.now() });
+  if (syncState.driftHistory.length > 8) syncState.driftHistory.shift();
+
+  const smoothedDrift = _weightedAverage(syncState.driftHistory.map(h => h.drift));
+  const history       = syncState.driftHistory;
+  let   driftRate     = history.length >= 2
+    ? (history[history.length-1].drift - history[0].drift) /
+      ((history[history.length-1].timestamp - history[0].timestamp) / 1000)
+    : 0;
+  driftRate = Math.max(-50, Math.min(50, driftRate)); // clamp аномальні значення
+
+  // Оновлюємо longTermDrift — дуже повільна адаптація
+  syncState.longTermDrift = syncState.longTermDrift +
+    (smoothedDrift - syncState.longTermDrift) * 0.02;
+
+  updateStability(drift, requestState.lastDrift);
+  updateUrgency(drift, driftRate);
+
+  if (absDrift < 8) {
+    // Все добре — плавно до 1.0
+    syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.2;
+    applyPlaybackRate(syncState.smoothedRate);
+
+  } else if (absDrift <= 30) {
+    // Тільки playbackRate — без перезапуску
+    const targetRate       = calcTargetRate(smoothedDrift, driftRate);
+    const lerpFactor       = Math.max(0.15, Math.min(0.5, absDrift / 30));
+    syncState.smoothedRate = syncState.smoothedRate +
+      (targetRate - syncState.smoothedRate) * lerpFactor;
+    applyPlaybackRate(syncState.smoothedRate);
+
+  } else {
+    // Великий дрейф — restart + playbackRate одночасно
+    const now        = Date.now();
+    const canRestart = (now - syncState.lastRestartTime) > 3000;
+    if (canRestart) {
+      syncState.lastRestartTime = now;
+      syncState.skipNext        = true;
+      urgencyState.level          = Math.min(100, urgencyState.level + 40);
+      requestState.stabilityScore = Math.max(0, requestState.stabilityScore - 20);
+      const targetRate       = calcTargetRate(smoothedDrift, driftRate);
+      // Обмежений діапазон після restart — ±3% непомітно на слух
+      syncState.smoothedRate = Math.max(0.97, Math.min(1.03, targetRate));
+      scheduleAudio();
+      applyPlaybackRate(syncState.smoothedRate);
+    } else {
+      // Cooldown активний — тільки rate
+      const targetRate       = calcTargetRate(smoothedDrift, driftRate);
+      const lerpFactor       = Math.max(0.15, Math.min(0.5, absDrift / 40));
+      syncState.smoothedRate = syncState.smoothedRate +
+        (targetRate - syncState.smoothedRate) * lerpFactor;
+      applyPlaybackRate(syncState.smoothedRate);
+    }
   }
+
+  scheduleNext();
 }
 
-// Планує серію корекцій після старту + постійний інтервал кожні 20с
-let correctionTimers = [];
-let periodicSyncInterval = null;
-
-function schedulePostStartCorrections() {
-  correctionTimers.forEach(t => clearTimeout(t));
-  correctionTimers = [];
-  // Дві перевірки після старту: 3s і 6s (раніше — пісня ще не грає або дрейф нульовий)
-  [3000, 6000].forEach(delay => {
-    const t = setTimeout(() => checkAndCorrect(), delay);
-    correctionTimers.push(t);
-  });
-  // Потім кожні 10 секунд — щоб дрейф не накопичувався
-  startPeriodicSync();
+function scheduleNext() {
+  if (syncLoopTimer) clearTimeout(syncLoopTimer);
+  const effectiveScore = Math.max(0, Math.min(100,
+    requestState.stabilityScore - urgencyState.level));
+  const base    = requestState.minInterval +
+                  (requestState.maxInterval - requestState.minInterval) *
+                  (effectiveScore / 100);
+  syncLoopTimer = setTimeout(adaptiveSyncLoop, _jitter(base));
 }
 
-function startPeriodicSync() {
-  stopPeriodicSync();
-  periodicSyncInterval = setInterval(async () => {
-    if (!playing || paused) return;
-    // 3 заміри для точного offset, потім перевірка дрейфу
-    await resync(3);
-    await checkAndCorrect();
-  }, 10000);
+function startAdaptiveSyncLoop() {
+  if (syncLoopTimer) clearTimeout(syncLoopTimer);
+  // Рандомний старт 2–5с — щоб клієнти не били сервер одночасно
+  syncLoopTimer = setTimeout(adaptiveSyncLoop, 2000 + Math.random() * 3000);
 }
 
-function stopPeriodicSync() {
-  if (periodicSyncInterval) {
-    clearInterval(periodicSyncInterval);
-    periodicSyncInterval = null;
-  }
-}
-
-function cancelCorrections() {
-  correctionTimers.forEach(t => clearTimeout(t));
-  correctionTimers = [];
-  stopPeriodicSync();
+function stopAdaptiveSyncLoop() {
+  if (syncLoopTimer) clearTimeout(syncLoopTimer);
+  syncLoopTimer = null;
 }
 
 // =============================================================================
@@ -374,7 +554,7 @@ if (headerToggle) {
     updateSpeakerUI();
     // Якщо вмикаємо звук під час відтворення — синхронізуємось
     if (!isMuted && syncAudioEnabled && audioUnlocked && playing && !paused && startTime !== null) {
-      resync(4).then(() => { scheduleAudio(); schedulePostStartCorrections(); });
+      scheduleAudio(); startAdaptiveSyncLoop();
     } else if (isMuted) {
       stopNode();
     }
@@ -557,7 +737,7 @@ async function handleMsg(msg) {
     // ── Pause ────────────────────────────────────────────────────────────────
     case 'pause': {
       paused = true;
-      cancelCorrections();
+      stopAdaptiveSyncLoop();
       stopNode();
       stopAnim(); stopScroll();
       if (role === 'host') { pauseBtn.textContent = '▶ Продовжити'; setStatus('Пауза.'); }
@@ -575,10 +755,8 @@ async function handleMsg(msg) {
       setStatus('');
       if (role === 'host') { pauseBtn.textContent = '⏸ Пауза'; }
       if (role === 'host' || (syncAudioEnabled && audioUnlocked && audioBuffer && !isMuted)) {
-        // FIX: 5 замірів (було 3) — пауза могла "розбити" offset
-        await resync(5);
         scheduleAudio();
-        schedulePostStartCorrections();
+        startAdaptiveSyncLoop();
       }
       break;
     }
@@ -586,7 +764,7 @@ async function handleMsg(msg) {
     // ── Stop ─────────────────────────────────────────────────────────────────
     case 'stop': {
       playing = false; paused = false; startTime = null;
-      cancelCorrections();
+      stopAdaptiveSyncLoop();
       stopNode();
       if (gainNode) { gainNode.gain.setValueAtTime(0, audioCtx?.currentTime || 0); }
       releaseWakeLock();
@@ -624,21 +802,15 @@ async function handleMsg(msg) {
           if (!audioBuffer) {
             setStatus('⏳ Завантаження…');
             try {
-              // Паралельно: завантажуємо буфер + перші заміри
-              await Promise.all([
-                ensureBuffer(currentSong),
-                resync(4),
-              ]);
+              await ensureBuffer(currentSong);
               setStatus('');
             } catch (e) {
               setStatus('⚠ ' + e.message); break;
             }
           }
           if (playing && !paused && startTime !== null) {
-            // Після завантаження — ще заміри для точного старту "на льоту"
-            await resync(4);
             scheduleAudio();
-            schedulePostStartCorrections();
+            startAdaptiveSyncLoop();
           }
         }
       } else {
@@ -688,10 +860,8 @@ async function doPlay(song) {
   resetScroll(); setStatus(''); startAnim(); startScroll();
 
   if (role === 'host') {
-    // Хост: resync перед стартом — є 3 секунди запасу
-    await resync(5);
     scheduleAudio();
-    schedulePostStartCorrections();
+    startAdaptiveSyncLoop();
 
   } else if (syncAudioEnabled && audioUnlocked && !isMuted) {
     if (!audioBuffer || currentSong !== song) {
@@ -699,10 +869,7 @@ async function doPlay(song) {
       clearBuffer();
       setStatus('⏳ Завантаження…');
       try {
-        await Promise.all([
-          ensureBuffer(song),
-          resync(4),
-        ]);
+        await ensureBuffer(song);
         setStatus('');
       } catch (e) {
         stopNode(); clearBuffer();
@@ -710,10 +877,8 @@ async function doPlay(song) {
         return;
       }
     }
-    // Після завантаження — ще 4 заміри вже з точним offset
-    await resync(4);
     scheduleAudio();
-    schedulePostStartCorrections();
+    startAdaptiveSyncLoop();
   }
 }
 
