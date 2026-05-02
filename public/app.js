@@ -441,7 +441,7 @@ const syncState = {
 };
 
 const requestState = {
-  stabilityScore:  50,
+  stabilityScore:  0,   // starts at 0 — fast initial cycles, builds up over time
   lastDrift:       0,
   lastRequestTime: 0,
   minInterval:     5000,
@@ -694,15 +694,19 @@ async function adaptiveSyncLoop() {
     const now        = Date.now();
     const canRestart = (now - syncState.lastRestartTime) > 3000;
 
-    if (!syncState.pendingRestart) {
-      // First time seeing this drift — set flag, verify next cycle
-      // (guards against single noisy measurement causing restart)
+    // In first 15s of playback, skip confirmation — initial offset error
+    // needs immediate correction. After 15s, require 2 consecutive measurements.
+    const playingForMs     = startTime !== null ? (serverNow() - startTime) : 99999;
+    const skipConfirmation = playingForMs < 15000;
+
+    if (!syncState.pendingRestart && !skipConfirmation) {
+      // Normal mode: set flag, verify next cycle
       syncState.pendingRestart  = true;
       syncState.largeDriftCount = 1;
       syncState.smoothedRate    = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
       applyPlaybackRate(syncState.smoothedRate);
 
-    } else if (canRestart) {
+    } else if (canRestart && (skipConfirmation || syncState.pendingRestart)) {
       // Confirmed by two consecutive cycles — restart now
       syncState.lastRestartTime = now;
       syncState.skipNext        = true;
@@ -742,8 +746,16 @@ function scheduleNext() {
 
 function startAdaptiveSyncLoop() {
   if (syncLoopTimer) clearTimeout(syncLoopTimer);
-  // Рандомний старт 2–5с — щоб клієнти не били сервер одночасно
-  syncLoopTimer = setTimeout(adaptiveSyncLoop, 2000 + Math.random() * 3000);
+  // Fast initial cycles: 1.5s → 3s → then normal schedule driven by stabilityScore
+  // This detects and corrects initial drift within 5s instead of 20-30s
+  // Jitter on first cycle so host+clients don't all hit server at the same ms
+  syncLoopTimer = setTimeout(() => {
+    adaptiveSyncLoop().then(() => {
+      if (syncLoopTimer !== null) {
+        syncLoopTimer = setTimeout(adaptiveSyncLoop, 3000 + Math.random() * 1000);
+      }
+    });
+  }, 1500 + Math.random() * 500);
 }
 
 function stopAdaptiveSyncLoop() {
@@ -1189,6 +1201,14 @@ async function handleMsg(msg) {
 async function doPlay(song) {
   playing = true; paused = false;
   requestWakeLock();
+  // Reset stability so first sync cycles run at fast interval (5s)
+  // After ~30s of stable play, score builds up and intervals lengthen naturally
+  requestState.stabilityScore = 0;
+  urgencyState.level = 0;
+  syncState.driftHistory = [];
+  syncState.stableCount  = 0;
+  syncState.pendingRestart = false;
+  syncState.largeDriftCount = 0;
 
   if (role === 'host') {
     // Буфер вже завантажено у playBtn handler до відправки команди play
@@ -1220,15 +1240,18 @@ async function doPlay(song) {
       clearBuffer();
       setStatus('⏳ Завантаження…');
       try {
-        await ensureBuffer(song);
+        // Load buffer and sync offset in parallel — offset stays fresh
+        // regardless of how long the MP3 takes to load
+        await Promise.all([ensureBuffer(song), preSync()]);
         setStatus('');
       } catch (e) {
         stopNode(); clearBuffer();
         setStatus('⚠ ' + e.message);
         return;
       }
+    } else {
+      await preSync();
     }
-    await preSync();
     scheduleAudio();
     startAdaptiveSyncLoop();
   }
