@@ -120,8 +120,10 @@ async function scheduleAudio() {
   }
   const msUntil = startTime - serverNow();
   const elapsed = Math.max(0, -msUntil / 1000);
-  // SAFETY_OFFSET — невеликий буфер щоб компенсувати затримку виконання
-  const off     = Math.min(elapsed + SAFETY_OFFSET, audioBuffer.duration - 0.01);
+  // SAFETY_OFFSET тільки для хоста: хост викликає scheduleAudio до WebSocket round-trip
+  // і потребує буфер. Клієнт стартує пізніше — додатковий offset дає систематичний випередження.
+  const safeOff = role === 'host' ? SAFETY_OFFSET : 0;
+  const off     = Math.min(elapsed + safeOff, audioBuffer.duration - 0.01);
   if (off >= audioBuffer.duration) return;
   const when = Math.max(audioCtx.currentTime + 0.005,
                         audioCtx.currentTime + msUntil / 1000);
@@ -390,7 +392,7 @@ async function adaptiveSyncLoop() {
   const prevExp    = syncState.lastExpected ?? expected;
   const expJump    = Math.abs((expected - prevExp) * 1000);
   syncState.lastExpected = expected;
-  const isNoisy    = (expJump > 40 && syncState.driftHistory.length > 0)
+  const isNoisy    = (expJump > 20 && syncState.driftHistory.length > 0)
                   || (absDrift > 80 && syncState.stableCount > 3);
   if (!isNoisy) {
     syncState.driftHistory.push({ drift, timestamp: Date.now() });
@@ -399,17 +401,23 @@ async function adaptiveSyncLoop() {
 
   const smoothedDrift = _weightedAverage(syncState.driftHistory.map(h => h.drift));
   const history       = syncState.driftHistory;
-  let   driftRate     = history.length >= 2
-    ? (history[history.length-1].drift - history[0].drift) /
-      ((history[history.length-1].timestamp - history[0].timestamp) / 1000)
-    : 0;
+  // driftRate from last 3 entries only — reflects current trend, not historical average
+  // Using first-to-last spans minutes and produces stale/reversed rate values
+  let   driftRate = 0;
+  if (history.length >= 2) {
+    const tail   = history.slice(-3); // last 3 (or fewer if history is short)
+    const dtMs   = tail[tail.length-1].timestamp - tail[0].timestamp;
+    if (dtMs > 0) {
+      driftRate = (tail[tail.length-1].drift - tail[0].drift) / (dtMs / 1000);
+    }
+  }
   driftRate = Math.max(-50, Math.min(50, driftRate)); // clamp аномальні значення
 
   // Оновлюємо longTermDrift — дуже повільна адаптація
   syncState.longTermDrift = syncState.longTermDrift +
     (smoothedDrift - syncState.longTermDrift) * 0.02;
 
-  // Urgency decay відбувається завжди — незалежно від якості виміру
+  // Urgency decay завжди — незалежно від якості виміру
   if (Date.now() - urgencyState.lastSpikeTime > 5000) {
     urgencyState.level = Math.max(0, urgencyState.level - 5);
   }
@@ -417,6 +425,13 @@ async function adaptiveSyncLoop() {
   if (!isNoisy) {
     updateStability(drift, requestState.lastDrift);
     updateUrgency(drift, driftRate);
+  } else {
+    // Навіть при шумному вимірі — дуже повільне повернення rate до 1.0
+    // Запобігає "замороженню" корекції на ненульовому значенні
+    syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.02;
+    applyPlaybackRate(syncState.smoothedRate);
+    scheduleNext();
+    return;
   }
 
   // Рішення приймаємо за smoothedDrift (згладжений), не за сирим drift
@@ -453,8 +468,8 @@ async function adaptiveSyncLoop() {
       syncState.pendingRestart = true;
       syncState.smoothedRate   = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
       applyPlaybackRate(syncState.smoothedRate);
-    } else if (syncState.largeDriftCount >= 2) {
-      // Підтверджено мінімум двома вимірами поспіль → restart
+    } else if (syncState.largeDriftCount >= 2 && syncState.driftHistory.length >= 4) {
+      // Підтверджено мінімум двома вимірами поспіль + достатньо даних → restart
       const now        = Date.now();
       const canRestart = (now - syncState.lastRestartTime) > 3000;
       if (canRestart) {
