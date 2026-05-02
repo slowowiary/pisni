@@ -197,27 +197,50 @@
       font-weight: 400;
       padding: 0 2px;
       position: relative;
-      /* біла обводка навколо кожної букви */
-      -webkit-text-stroke: 1.5px rgba(255, 255, 255, 0.95);
-      paint-order: stroke fill;
-      text-shadow: none;
+      /* Біла обводка через text-shadow — працює і на iOS і на Android Chrome.
+         8 напрямків по 1.5px дають рівну обводку навколо кожної букви */
+      text-shadow:
+         1.5px  0    0 #fff,
+        -1.5px  0    0 #fff,
+         0      1.5px 0 #fff,
+         0     -1.5px 0 #fff,
+         1.1px  1.1px 0 #fff,
+        -1.1px  1.1px 0 #fff,
+         1.1px -1.1px 0 #fff,
+        -1.1px -1.1px 0 #fff;
       transition: color 0.4s ease, text-shadow 1.2s ease;
     }
     .word::before { content: attr(data-word); display: block; font-weight: 700; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
-    .word.done { color: #888; text-shadow: none; }
+    .word.done { color: #888; }
     .word.pre-active {
       text-shadow:
-        0 0 14px rgba(255, 100, 100, 0.50),
-        0 0 32px rgba(255, 100, 100, 0.28),
-        0 0 60px rgba(255, 100, 100, 0.12);
+         1.5px  0    0 #fff,
+        -1.5px  0    0 #fff,
+         0      1.5px 0 #fff,
+         0     -1.5px 0 #fff,
+         1.1px  1.1px 0 #fff,
+        -1.1px  1.1px 0 #fff,
+         1.1px -1.1px 0 #fff,
+        -1.1px -1.1px 0 #fff,
+        0 0 14px rgba(255, 80, 80, 0.60),
+        0 0 32px rgba(255, 80, 80, 0.35),
+        0 0 55px rgba(255, 80, 80, 0.18);
     }
     .word.active {
       text-shadow:
-        0 0 10px rgba(255, 100, 100, 0.75),
-        0 0 24px rgba(255, 100, 100, 0.55),
-        0 0 50px rgba(255, 100, 100, 0.30),
-        0 0 85px rgba(255, 100, 100, 0.15),
-        0 0 120px rgba(255, 100, 100, 0.07);
+         1.5px  0    0 #fff,
+        -1.5px  0    0 #fff,
+         0      1.5px 0 #fff,
+         0     -1.5px 0 #fff,
+         1.1px  1.1px 0 #fff,
+        -1.1px  1.1px 0 #fff,
+         1.1px -1.1px 0 #fff,
+        -1.1px -1.1px 0 #fff,
+        0 0 10px rgba(255, 80, 80, 0.85),
+        0 0 22px rgba(255, 80, 80, 0.65),
+        0 0 45px rgba(255, 80, 80, 0.38),
+        0 0 75px rgba(255, 80, 80, 0.18),
+        0 0 110px rgba(255, 80, 80, 0.08);
     }
 
     /* ── Список пісень ──────────────────────────────────────── */
