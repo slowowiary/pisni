@@ -226,17 +226,15 @@
       padding: 0 2px;
       position: relative;
       text-shadow: none;
-      transition: color 0.4s ease, text-shadow 1.2s ease, box-shadow 1.2s ease;
+      transition: color 0.6s ease;
     }
     .word::before { content: attr(data-word); display: block; font-weight: 700; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
-    .word.done { color: #bbb; box-shadow: none; text-shadow: none; }
-
-    /* Верхня і нижня лінії через box-shadow (тільки top+bottom) */
+    .word.done { color: #333; }
     .word.pre-active {
-      box-shadow: 0 4px 0 0 rgba(220, 0, 0, 0.50);
+      color: rgba(170, 0, 0, 0.55);
     }
     .word.active {
-      box-shadow: 0 4px 0 0 rgba(200, 0, 0, 0.90);
+      color: #cc0000;
     }
 
     /* ── Список пісень ──────────────────────────────────────── */
