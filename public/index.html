@@ -165,6 +165,31 @@
     #sync-audio-label.on { border-color: #3f51b5; background: #e8eaf6; color: #3f51b5; font-weight: 600; }
     #sync-audio-label input { accent-color: #3f51b5; width: 1rem; height: 1rem; cursor: pointer; }
 
+    /* Volume control */
+    #volume-row {
+      display: flex; align-items: center; gap: .8rem;
+      width: 100%; max-width: 340px;
+      padding: .5rem .8rem;
+      background: #fff; border: 1px solid #c5cae9; border-radius: 8px;
+      font-size: .85rem; color: #555;
+    }
+    #volume-row span { white-space: nowrap; min-width: 2.2rem; text-align: right; font-size: .8rem; color: #888; }
+    #volume-slider {
+      flex: 1; -webkit-appearance: none; appearance: none;
+      height: 4px; border-radius: 2px;
+      background: linear-gradient(to right, #3f51b5 var(--vol, 80%), #dde3ff var(--vol, 80%));
+      outline: none; cursor: pointer;
+    }
+    #volume-slider::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 18px; height: 18px;
+      border-radius: 50%; background: #3f51b5;
+      box-shadow: 0 1px 4px rgba(63,81,181,.4); cursor: pointer;
+    }
+    #volume-slider::-moz-range-thumb {
+      width: 18px; height: 18px; border: none;
+      border-radius: 50%; background: #3f51b5; cursor: pointer;
+    }
+
     /* ── Блок субтитрів ─────────────────────────────────────── */
     #lyrics-container {
       width: 100%; max-width: 720px;
@@ -425,6 +450,13 @@
       <div class="btn-row">
         <button id="play-btn"  hidden>▶ Грати</button>
         <button id="pause-btn" hidden>⏸ Пауза</button>
+      </div>
+
+      <!-- Volume control — visible to all, controlled by host -->
+      <div id="volume-row" hidden>
+        <span>🔊</span>
+        <input id="volume-slider" type="range" min="0" max="100" value="80">
+        <span id="volume-label">80%</span>
       </div>
 
 
