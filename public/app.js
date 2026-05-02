@@ -551,19 +551,51 @@ function applyPlaybackRate(rate) {
   sourceNode.playbackRate.setTargetAtTime(rate, audioCtx.currentTime, 0.5);
 }
 
+// Fast seek without HTTP request — used when offset is fresh and drift is large.
+// iOS AudioContext freezes ~67ms every 10-40s. We detect this in localCorrection
+// (called every animation frame at 60fps) and fix it in <100ms without waiting
+// for the next adaptiveSyncLoop cycle (which could be 5-15s away).
+let _lastFastSeek = 0;
+
 function localCorrection() {
   if (syncState.skipNext || !playing || paused || startTime === null) return;
   const actual = getActualPos();
   if (actual === null) return;
-  const isStale = (Date.now() - requestState.lastRequestTime) > 15000;
+
+  const offsetAge = Date.now() - requestState.lastRequestTime;
+  const isStale   = offsetAge > 15000;
+
   if (isStale) {
     syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.02;
     applyPlaybackRate(syncState.smoothedRate);
     return;
   }
+
   const expected = (serverNow() - startTime) / 1000;
   const drift    = (actual - expected) * 1000;
   const absDrift = Math.abs(drift);
+
+  // ── Fast seek (no HTTP) ─────────────────────────────────────────────────────
+  // If drift > 25ms but offset is fresh (<5s old): seek immediately without preSync.
+  // iOS freeze is always ~67ms — we can correct it in one frame using existing offset.
+  // Cooldown 2s to prevent seek loops if something is wrong.
+  const now = Date.now();
+  if (absDrift >= 25 && absDrift < 150 && offsetAge < 5000 &&
+      (now - _lastFastSeek) > 2000 &&
+      (now - syncState.lastRestartTime) > 1000) {
+    _lastFastSeek = now;
+    syncState.lastRestartTime = now;
+    syncState.driftHistory   = [];
+    syncState.stableCount    = 0;
+    syncState.pendingRestart = false;
+    syncState.smoothedRate   = 1.0;
+    if (DEBUG_SYNC) _dbg.event('FAST-SEEK',
+      `drift=${drift.toFixed(1)}ms off_age=${offsetAge}ms`);
+    scheduleAudio(); // reseek using current (fresh) offset — no HTTP needed
+    applyPlaybackRate(1.0);
+    return;
+  }
+
   if (absDrift < 6) {
     // Dead zone — return to 1.0
     syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
@@ -571,14 +603,14 @@ function localCorrection() {
     return;
   }
   if (absDrift < 25) {
-    // Rate correction — same gentler formula as Tier 2 in main loop
+    // Rate correction
     const rateCorrection   = Math.max(-0.005, Math.min(0.005, -drift * 0.00005));
     const targetRate       = Math.max(0.995, Math.min(1.005, 1.0 + rateCorrection));
     syncState.smoothedRate = syncState.smoothedRate * 0.8 + targetRate * 0.2;
     applyPlaybackRate(syncState.smoothedRate);
     return;
   }
-  // Large drift but no fresh server measurement — just nudge slowly
+  // Large drift, stale offset or too soon after last seek — nudge slowly
   syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.03;
   applyPlaybackRate(syncState.smoothedRate);
 }
