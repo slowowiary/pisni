@@ -1319,7 +1319,7 @@ async function handleMsg(msg) {
         lyricsCont.hidden = true;
         syncAudioEnabled = msg.syncAudio || false;
         setHeaderToggle(syncAudioEnabled);
-        if (msg.volume !== undefined) applyVolume(msg.volume);
+        if (msg.volume !== undefined && msg.role !== 'host') applyVolume(msg.volume);
         setStatus('Очікування хоста…');
       }
       break;
@@ -1330,7 +1330,9 @@ async function handleMsg(msg) {
 
     // ── Debug log from client ─────────────────────────────────────────────────
     case 'set_volume': {
-      applyVolume(msg.volume ?? 0.8);
+      // Host is source of truth — ignore incoming set_volume on host side
+      // (avoids feedback loop where finalizeJoin sends volume back to host)
+      if (role !== 'host') applyVolume(msg.volume ?? 0.8);
       break;
     }
 
@@ -1401,10 +1403,8 @@ async function handleMsg(msg) {
       playing = false; paused = false; startTime = null;
       stopAdaptiveSyncLoop();
       stopNode();
-      if (gainNode) { gainNode.gain.setValueAtTime(0, audioCtx?.currentTime || 0); }
       releaseWakeLock();
       stopAnim(); stopScroll(); clearHL(); resetScroll();
-      setTimeout(() => { if (gainNode) gainNode.gain.setValueAtTime(isMuted ? 0 : 1, audioCtx?.currentTime || 0); }, 100);
       if (role === 'host') {
         playBtn.hidden = false;
         playBtn.textContent = '▶ Грати'; pauseBtn.hidden = true;
