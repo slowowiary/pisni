@@ -1351,7 +1351,6 @@ async function handleMsg(msg) {
     case 'play': {
       const incomingSong = msg.song;
       startTime          = msg.startTime;
-      paused             = false;
       syncAudioEnabled   = msg.syncAudio || false;
 
       // FIX: якщо пісня змінилась — скидаємо буфер, завантажуємо нову
@@ -1362,12 +1361,23 @@ async function handleMsg(msg) {
         await loadLyrics(incomingSong);
       }
 
-      await doPlay(incomingSong);
+      if (msg.alreadyPaused) {
+        // Reconnecting while paused — load song state but don't start audio
+        playing = true;
+        paused  = true;
+        startAnim(); // show lyrics position
+        if (role === 'host') { pauseBtn.textContent = '▶ Продовжити'; }
+        else setStatus('Хост поставив на паузу…');
+      } else {
+        paused = false;
+        await doPlay(incomingSong);
+      }
       break;
     }
 
     // ── Pause ────────────────────────────────────────────────────────────────
     case 'pause': {
+      if (!playing) break; // ignore stale pause if not playing
       paused = true;
       stopAdaptiveSyncLoop();
       stopNode();
@@ -1379,6 +1389,7 @@ async function handleMsg(msg) {
 
     // ── Resume ───────────────────────────────────────────────────────────────
     case 'resume': {
+      if (!playing) break; // ignore stale resume if not playing
       startTime        = msg.startTime;
       paused           = false;
       syncAudioEnabled = msg.syncAudio || false;
