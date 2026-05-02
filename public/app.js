@@ -331,9 +331,11 @@ function addSample(srvTime, t0) {
   const rtt = Date.now() - t0;
   const rawOff = srvTime - (t0 + rtt / 2);
 
-  // Sanity check: offset > ±5 minutes is physically impossible (browser vs server)
-  // Discard the sample entirely — do not corrupt clockSamples with bad data
-  const MAX_OFFSET = 300000; // 5 minutes in ms
+  // Sanity check: discard only truly impossible values (>24h difference)
+  // 24h covers any timezone mismatch — a device with wrong timezone has a stable
+  // but shifted Date.now(). We should accept it and use the offset as-is.
+  // Values beyond 24h suggest a broken clock or corrupted response.
+  const MAX_OFFSET = 86400000; // 24 hours in ms
   if (Math.abs(rawOff) > MAX_OFFSET) {
     if (DEBUG_SYNC) _dbg.event('offset-BAD', `discarded rawOff=${rawOff.toFixed(0)}ms rtt=${rtt}ms`);
     return;
@@ -388,13 +390,14 @@ async function syncOnEntry(id) {
 // під час відтворення скидання дасть різкий стрибок offset → хибний drift
 async function preSync() {
   if (DEBUG_SYNC) _dbg.event('preSync', `start offset=${offset.toFixed(1)}ms playing=${playing}`);
-  // Reset clockSamples if offset is already corrupt (>5min) — bad samples must go
-  // Also reset on start (not playing) as before
-  if (!playing || Math.abs(offset) > 300000) {
+  // Reset clockSamples on start, or if offset is absurd (>24h — broken device clock)
+  // Do NOT zero offset on corrupt reset — keep previous value as best estimate
+  // until new valid samples arrive. Zeroing causes exp=-3528s nonsense.
+  if (!playing || Math.abs(offset) > 86400000) {
     clockSamples = [];
-    if (Math.abs(offset) > 300000) {
-      if (DEBUG_SYNC) _dbg.event('preSync', `offset corrupt, resetting clockSamples`);
-      offset = 0; // reset to neutral so first real sample lands cleanly
+    if (Math.abs(offset) > 86400000) {
+      if (DEBUG_SYNC) _dbg.event('preSync', `offset absurd (${offset.toFixed(0)}ms), resetting samples`);
+      // Keep offset as-is — new samples will correct it via EMA
     }
   }
   for (let i = 0; i < 4; i++) {
@@ -433,6 +436,7 @@ const syncState = {
   pendingRestart:     false, // перший великий drift → чекаємо підтвердження
   stableCount:        0,     // скільки разів поспіль drift < 15ms (інерція)
   lastOffset:         null,  // попередній offset після запиту — для виявлення стрибків
+  lastSmdSign:        0,     // sign of smoothedDrift last cycle — oscillation guard
 };
 
 const requestState = {
@@ -668,21 +672,34 @@ async function adaptiveSyncLoop() {
     // Мертва зона — дуже повільно до 1.0
     syncState.largeDriftCount = 0;
     syncState.pendingRestart  = false;
+    syncState.lastSmdSign     = 0; // reset sign tracking in dead zone
     syncState.stableCount     = Math.min(syncState.stableCount + 1, 20);
     syncState.smoothedRate    = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.05;
     applyPlaybackRate(syncState.smoothedRate);
 
   } else if (absSmoothed <= 40) {
     // Середній drift — слабка корекція через driftRate
-    // Інерція: якщо система довго була стабільна → ще повільніша реакція
     syncState.largeDriftCount = 0;
     syncState.pendingRestart  = false;
-    const inertia    = syncState.stableCount > 5 ? 0.04 : 0.08;
-    syncState.stableCount = 0;
-    const targetRate = calcTargetRate(driftRate, smoothedDrift);
-    syncState.smoothedRate = syncState.smoothedRate +
-      (targetRate - syncState.smoothedRate) * inertia;
-    applyPlaybackRate(syncState.smoothedRate);
+    const curSign  = smoothedDrift > 0 ? 1 : -1;
+    const signFlip = syncState.lastSmdSign !== 0 && curSign !== syncState.lastSmdSign;
+    syncState.lastSmdSign = curSign;
+    if (signFlip) {
+      // smoothedDrift crossed zero — skip rate change this cycle to avoid oscillation.
+      // Just nudge very slowly back to 1.0 and wait for stable direction next cycle.
+      syncState.stableCount = 0;
+      syncState.smoothedRate = syncState.smoothedRate + (1.0 - syncState.smoothedRate) * 0.02;
+      applyPlaybackRate(syncState.smoothedRate);
+    } else {
+      // Stable direction — apply correction
+      // Інерція: якщо система довго була стабільна → ще повільніша реакція
+      const inertia = syncState.stableCount > 5 ? 0.04 : 0.08;
+      syncState.stableCount = 0;
+      const targetRate = calcTargetRate(driftRate, smoothedDrift);
+      syncState.smoothedRate = syncState.smoothedRate +
+        (targetRate - syncState.smoothedRate) * inertia;
+      applyPlaybackRate(syncState.smoothedRate);
+    }
 
   } else {
     // Великий drift — потрібне підтвердження перед restart
