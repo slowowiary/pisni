@@ -120,7 +120,8 @@ async function scheduleAudio() {
   }
   const msUntil = startTime - serverNow();
   const elapsed = Math.max(0, -msUntil / 1000);
-  const off     = Math.min(elapsed, audioBuffer.duration - 0.01);
+  // SAFETY_OFFSET — невеликий буфер щоб компенсувати затримку виконання
+  const off     = Math.min(elapsed + SAFETY_OFFSET, audioBuffer.duration - 0.01);
   if (off >= audioBuffer.duration) return;
   const when = Math.max(audioCtx.currentTime + 0.005,
                         audioCtx.currentTime + msUntil / 1000);
@@ -198,7 +199,10 @@ async function preSync() {
 // Поточна позиція відтворення в секундах
 function getActualPos() {
   if (!sourceNode || !audioCtx) return null;
-  return sourceNode._off + (audioCtx.currentTime - sourceNode._when);
+  const elapsed = audioCtx.currentTime - sourceNode._when;
+  // ВАЖЛИВО: враховуємо playbackRate — без цього drift вимірюється неправильно
+  const rate    = sourceNode.playbackRate?.value ?? 1.0;
+  return sourceNode._off + elapsed * rate;
 }
 
 // =============================================================================
@@ -266,7 +270,9 @@ function shouldRequest(forcedByDrift) {
   const score   = requestState.stabilityScore;
   const urgency = urgencyState.level;
   // Жорстке блокування при високій стабільності і низькому urgency
-  if (score > 85 && urgency < 5) return false;
+  if (score > 85 && urgency < 5) {
+    if (Date.now() - requestState.lastRequestTime < 30000) return false;
+  }
   const elapsed        = Date.now() - requestState.lastRequestTime;
   const effectiveScore = Math.max(0, Math.min(100, score - urgency));
   const base           = requestState.minInterval +
