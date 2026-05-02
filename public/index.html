@@ -214,6 +214,9 @@
       line-height: 2.3;
       text-align: center;
       will-change: transform;
+      /* GPU layer for smooth scroll on older Android */
+      transform: translateZ(0);
+      backface-visibility: hidden;
 
     }
     .word {
@@ -224,42 +227,42 @@
       position: relative;
       /* Біла обводка 1.5px */
       text-shadow:
-         1px  0    0 #333,
-        -1px  0    0 #333,
-         0      1px 0 #333,
-         0     -1px 0 #333,
-         0.7px  0.7px 0 #333,
-        -0.7px  0.7px 0 #333,
-         0.7px -0.7px 0 #333,
-        -0.7px -0.7px 0 #333;
+         1px  0    0 #fff,
+        -1px  0    0 #fff,
+         0      1px 0 #fff,
+         0     -1px 0 #fff,
+         0.7px  0.7px 0 #fff,
+        -0.7px  0.7px 0 #fff,
+         0.7px -0.7px 0 #fff,
+        -0.7px -0.7px 0 #fff;
       transition: color 0.4s ease, text-shadow 1.2s ease;
     }
     .word::before { content: attr(data-word); display: block; font-weight: 700; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
-    .word.done { color: #888; }
+    .word.done { color: #bbb; }
     .word.pre-active {
       text-shadow:
-         1px  0    0 #333,
-        -1px  0    0 #333,
-         0      1px 0 #333,
-         0     -1px 0 #333,
-         0.7px  0.7px 0 #333,
-        -0.7px  0.7px 0 #333,
-         0.7px -0.7px 0 #333,
-        -0.7px -0.7px 0 #333,
+         1px  0    0 #fff,
+        -1px  0    0 #fff,
+         0      1px 0 #fff,
+         0     -1px 0 #fff,
+         0.7px  0.7px 0 #fff,
+        -0.7px  0.7px 0 #fff,
+         0.7px -0.7px 0 #fff,
+        -0.7px -0.7px 0 #fff,
         0 0 14px rgba(255, 0, 0, 0.70),
         0 0 32px rgba(255, 0, 0, 0.45),
         0 0 55px rgba(255, 0, 0, 0.22);
     }
     .word.active {
       text-shadow:
-         1px  0    0 #333,
-        -1px  0    0 #333,
-         0      1px 0 #333,
-         0     -1px 0 #333,
-         0.7px  0.7px 0 #333,
-        -0.7px  0.7px 0 #333,
-         0.7px -0.7px 0 #333,
-        -0.7px -0.7px 0 #333,
+         1px  0    0 #fff,
+        -1px  0    0 #fff,
+         0      1px 0 #fff,
+         0     -1px 0 #fff,
+         0.7px  0.7px 0 #fff,
+        -0.7px  0.7px 0 #fff,
+         0.7px -0.7px 0 #fff,
+        -0.7px -0.7px 0 #fff,
         0 0 10px rgba(255, 0, 0, 0.95),
         0 0 22px rgba(255, 0, 0, 0.75),
         0 0 45px rgba(255, 0, 0, 0.50),
