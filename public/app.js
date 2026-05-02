@@ -822,9 +822,9 @@ function updateScroll() {
   // Target: keep word at 25% from top
   const newTarget = Math.max(0, wordTop - containerH * 0.25);
 
-  // Speed curve: urgency = fraction² × 1.2, capped at 1.0
-  // fraction=0.33 → 0.13 (slow), fraction=0.50 → 0.30, fraction=1.0 → 1.0
-  const urgency = Math.min(1.0, fraction * fraction * 1.2);
+  // Speed curve: urgency = fraction² × 0.30
+  // fraction=0.30 → 0.027, fraction=0.50 → 0.075, fraction=1.0 → 0.30 (max)
+  const urgency = fraction * fraction * 0.30;
 
   targetScrollY = targetScrollY + (newTarget - targetScrollY) * urgency;
 }
