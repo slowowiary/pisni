@@ -284,10 +284,11 @@ async function scheduleAudio() {
   }
   const msUntil = startTime - serverNow();
   const elapsed = Math.max(0, -msUntil / 1000);
-  // SAFETY_OFFSET тільки для хоста: хост викликає scheduleAudio до WebSocket round-trip
-  // і потребує буфер. Клієнт стартує пізніше — додатковий offset дає систематичний випередження.
-  const safeOff = role === 'host' ? SAFETY_OFFSET : 0;
-  const off     = Math.min(elapsed + safeOff, audioBuffer.duration - 0.01);
+  // No SAFETY_OFFSET in file position — adding it to 'off' causes getActualPos()
+  // to return (elapsed + SAFETY_OFFSET) which is always ~30ms above expected,
+  // creating a permanent fake drift that triggers endless restarts.
+  // Web Audio src.start(when, off) with 'when' in the future provides its own buffer.
+  const off = Math.min(elapsed, audioBuffer.duration - 0.01);
   if (off >= audioBuffer.duration) return;
   const when = Math.max(audioCtx.currentTime + 0.005,
                         audioCtx.currentTime + msUntil / 1000);
