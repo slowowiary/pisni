@@ -310,7 +310,7 @@ async function scheduleAudio(fadeIn = false) {
     // timeConstant=0.015s → reaches ~95% in ~45ms — eliminates click, no audible gap
     gainNode.gain.cancelScheduledValues(when);
     gainNode.gain.setValueAtTime(0, when);
-    gainNode.gain.setTargetAtTime(targetGain, when, 0.005);
+    gainNode.gain.setTargetAtTime(targetGain, when, 0.010);
   } else {
     gainNode.gain.cancelScheduledValues(audioCtx.currentTime);
     gainNode.gain.setValueAtTime(targetGain, audioCtx.currentTime);
