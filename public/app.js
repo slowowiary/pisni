@@ -311,6 +311,7 @@ async function scheduleAudio(fadeIn = false) {
     gainNode.gain.cancelScheduledValues(when);
     gainNode.gain.setValueAtTime(0, when);
     gainNode.gain.setTargetAtTime(targetGain, when, 0.010);
+    gainNode.gain.setValueAtTime(targetGain, when + 0.150); // iOS: force final value after fade
   } else {
     gainNode.gain.cancelScheduledValues(audioCtx.currentTime);
     gainNode.gain.setValueAtTime(targetGain, audioCtx.currentTime);
