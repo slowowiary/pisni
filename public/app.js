@@ -8,7 +8,7 @@ const WORKER_URL = 'https://pisni.slovo-wiry.workers.dev';
 // DEBUG SYNC SYSTEM
 // Set DEBUG_SYNC = true to enable. Zero overhead when false.
 // =============================================================================
-const DEBUG_SYNC = false; // set to true to enable sync debug panel and logging
+const DEBUG_SYNC = true; // set to true to enable sync debug panel and logging
 const _DBG_START  = Date.now(); // session start for external timestamp use
 
 const _dbg = (() => {
@@ -325,7 +325,7 @@ async function scheduleAudio(fadeIn = false) {
   // But push current point as the new anchor for the long-term ratio
   if (!syncState.ctxSamples) syncState.ctxSamples = [];
   syncState.ctxSamples.push({ wall: Date.now(), ctx: audioCtx.currentTime });
-  if (DEBUG_SYNC) _dbg.event('scheduleAudio', `off=${off.toFixed(3)}s when=${when.toFixed(3)} startTime=${startTime} offset=${offset.toFixed(1)}ms`);
+  if (DEBUG_SYNC) _dbg.event('scheduleAudio', `off=${off.toFixed(3)}s when=${when.toFixed(3)} startTime=${startTime} offset=${offset.toFixed(1)}ms fadeIn=${fadeIn} gain=${targetGain.toFixed(3)} muted=${isMuted}`);
   sourceNode = src;
   src.onended = () => {
     if (sourceNode === src) { sourceNode = null; if (role === 'host' && playing) songEnded(); }
@@ -906,6 +906,10 @@ async function adaptiveSyncLoop() {
     }
   }
 
+  if (DEBUG_SYNC && gainNode) {
+    _dbg.event('gain', `current=${gainNode.gain.value.toFixed(3)} globalVol=${globalVolume.toFixed(3)} muted=${isMuted}`);
+  }
+
   scheduleNext();
 }
 
@@ -1101,6 +1105,7 @@ if (headerToggle) {
   headerToggle.addEventListener('click', async () => {
     isMuted = !isMuted;
     if (gainNode) { gainNode.gain.cancelScheduledValues(audioCtx.currentTime); gainNode.gain.setValueAtTime(isMuted ? 0 : globalVolume, audioCtx.currentTime); }
+    if (DEBUG_SYNC) _dbg.event('mute-toggle', `isMuted=${isMuted} gain=${gainNode ? gainNode.gain.value.toFixed(3) : 'null'} globalVol=${globalVolume.toFixed(3)}`);
     updateSpeakerUI();
     // Якщо вмикаємо звук під час відтворення — синхронізуємось
     if (!isMuted && syncAudioEnabled && audioUnlocked && playing && !paused && startTime !== null) {
@@ -1127,6 +1132,7 @@ function getClientId() {
 function applyVolume(vol) {
   globalVolume = Math.max(0, Math.min(1, vol));
   if (gainNode && !isMuted) { gainNode.gain.cancelScheduledValues(audioCtx.currentTime); gainNode.gain.setValueAtTime(globalVolume, audioCtx.currentTime); }
+  if (DEBUG_SYNC) _dbg.event('applyVolume', `vol=${globalVolume.toFixed(3)} muted=${isMuted} gainNode=${gainNode ? gainNode.gain.value.toFixed(3) : 'null'}`);
   const slider = document.getElementById('volume-slider');
   const label  = document.getElementById('volume-label');
   if (slider) {
