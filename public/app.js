@@ -306,12 +306,11 @@ async function scheduleAudio(fadeIn = false) {
   src._off   = off;
   const targetGain = isMuted ? 0 : globalVolume;
   if (fadeIn && !isMuted) {
-    // Smooth fade-in on sync corrections: ramp from 0 → globalVolume
-    // timeConstant=0.015s → reaches ~95% in ~45ms — eliminates click, no audible gap
+    // Linear ramp from 0 → globalVolume over 30ms — clean start, definite end point
+    // linearRampToValueAtTime has a precise end unlike setTargetAtTime (infinite curve)
     gainNode.gain.cancelScheduledValues(when);
     gainNode.gain.setValueAtTime(0, when);
-    gainNode.gain.setTargetAtTime(targetGain, when, 0.010);
-    gainNode.gain.setValueAtTime(targetGain, when + 0.150); // iOS: force final value after fade
+    gainNode.gain.linearRampToValueAtTime(targetGain, when + 0.030);
   } else {
     gainNode.gain.cancelScheduledValues(audioCtx.currentTime);
     gainNode.gain.setValueAtTime(targetGain, audioCtx.currentTime);
