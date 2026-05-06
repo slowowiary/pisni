@@ -277,7 +277,7 @@ function clearBuffer() {
 // =============================================================================
 // Планування відтворення
 // =============================================================================
-async function scheduleAudio() {
+async function scheduleAudio(fadeIn = false) {
   if (!audioBuffer || startTime === null || !audioCtx) return;
   stopNode();
   if (audioCtx.state !== 'running') {
@@ -304,7 +304,17 @@ async function scheduleAudio() {
   src.buffer = audioBuffer;
   src._when  = when;
   src._off   = off;
-  gainNode.gain.value = isMuted ? 0 : globalVolume;
+  const targetGain = isMuted ? 0 : globalVolume;
+  if (fadeIn && !isMuted) {
+    // Smooth fade-in on sync corrections: ramp from 0 → globalVolume
+    // timeConstant=0.015s → reaches ~95% in ~45ms — eliminates click, no audible gap
+    gainNode.gain.cancelScheduledValues(when);
+    gainNode.gain.setValueAtTime(0, when);
+    gainNode.gain.setTargetAtTime(targetGain, when, 0.005);
+  } else {
+    gainNode.gain.cancelScheduledValues(audioCtx.currentTime);
+    gainNode.gain.setValueAtTime(targetGain, audioCtx.currentTime);
+  }
   src.connect(gainNode);
   src.start(when, off);
   // Record wall clock and ctx time anchor for throttle detection
@@ -592,7 +602,7 @@ function localCorrection() {
     syncState.smoothedRate   = 1.0;
     if (DEBUG_SYNC) _dbg.event('FAST-SEEK',
       `drift=${drift.toFixed(1)}ms off_age=${offsetAge}ms`);
-    scheduleAudio(); // reseek using current (fresh) offset — no HTTP needed
+    scheduleAudio(true); // reseek using current (fresh) offset — no HTTP needed
     applyPlaybackRate(1.0);
     return;
   }
@@ -626,7 +636,7 @@ async function adaptiveSyncLoop() {
     if (DEBUG_SYNC) _dbg.event('audioCtx', 'suspended — resumed, rescheduling');
     syncState.driftHistory = [];
     await preSync();
-    scheduleAudio();
+    scheduleAudio(true);
     scheduleNext();
     return;
   }
@@ -886,7 +896,7 @@ async function adaptiveSyncLoop() {
       syncState.stableCount    = 0;
       syncState.pendingRestart = false;
       await preSync();
-      scheduleAudio();
+      scheduleAudio(true);
       syncState.smoothedRate = 1.0;
       applyPlaybackRate(1.0);
 
