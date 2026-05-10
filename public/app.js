@@ -247,38 +247,31 @@ function unlockAudio() {
 
 // Завантажує MP3. Якщо вже завантажений — повертає кеш.
 // FIX: скидає audioBuffer якщо пісня змінилась
-// Simple buffer loader — one load at a time via loadingSong guard
 async function ensureBuffer(song) {
+  // Вже є правильний буфер
   if (audioBuffer && currentSong === song) return audioBuffer;
+  // Якщо буфер від іншої пісні — скидаємо
+  if (audioBuffer && currentSong !== song) audioBuffer = null;
   initAudio();
   loadingSong = song;
-  audioBuffer = null;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 15000);
   try {
-    const res = await fetch('/songs/' + song + '/' + song + '.mp3',
-      { signal: ctrl.signal });
-    clearTimeout(timer);
+    const res = await fetch('/songs/' + song + '/' + song + '.mp3');
     if (!res.ok) throw new Error('MP3 not found: ' + song);
     const arr = await res.arrayBuffer();
-    if (loadingSong !== song) return null; // superseded
-    const buf = await new Promise((ok, fail) =>
-      audioCtx.decodeAudioData(arr, ok, fail));
-    if (loadingSong !== song) return null; // superseded
-    audioBuffer = buf;
-    currentSong = song;
+    if (loadingSong !== song) throw new Error('Song changed during load');
+    audioBuffer = await new Promise((ok, fail) => audioCtx.decodeAudioData(arr, ok, fail));
     loadingSong = null;
     return audioBuffer;
   } catch (e) {
-    clearTimeout(timer);
-    if (loadingSong === song) { loadingSong = null; audioBuffer = null; }
-    if (e.name === 'AbortError') return null;
+    loadingSong = null;
+    audioBuffer = null;
     throw e;
   }
 }
+
 function clearBuffer() {
   audioBuffer = null;
-  loadingSong = null; // signals ensureBuffer to discard in-flight result
+  loadingSong = null;
 }
 
 // =============================================================================
@@ -416,39 +409,26 @@ async function syncOnEntry(id) {
 // під час відтворення скидання дасть різкий стрибок offset → хибний drift
 async function preSync() {
   if (DEBUG_SYNC) _dbg.event('preSync', `start offset=${offset.toFixed(1)}ms playing=${playing}`);
+  // Reset clockSamples on start, or if offset is absurd (>24h — broken device clock)
+  // Do NOT zero offset on corrupt reset — keep previous value as best estimate
+  // until new valid samples arrive. Zeroing causes exp=-3528s nonsense.
   if (!playing || Math.abs(offset) > 86400000) {
     clockSamples = [];
+    if (Math.abs(offset) > 86400000) {
+      if (DEBUG_SYNC) _dbg.event('preSync', `offset absurd (${offset.toFixed(0)}ms), resetting samples`);
+      // Keep offset as-is — new samples will correct it via EMA
+    }
   }
-  // Overall 5s timeout for entire preSync — if network is very slow,
-  // proceed with current offset rather than hanging the start
-  let _preSyncDone = false;
-  const _preSyncTimeout = setTimeout(() => {
-    if (!_preSyncDone && DEBUG_SYNC)
-      _dbg.event('preSync', 'timeout — proceeding with current offset');
-  }, 5000);
-  try {
   for (let i = 0; i < 6; i++) {
     const t0  = Date.now();
-    // 2s timeout per request — prevents preSync from hanging on bad network
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2000);
-    try {
-      const res = await fetch(`${WORKER_URL}/room/${roomId}/time`,
-        { signal: controller.signal }).catch(() => null);
-      if (res?.ok) {
-        addSample((await res.json()).serverTime, t0);
-        requestState.lastRequestTime = Date.now();
-      }
-    } finally {
-      clearTimeout(timer);
+    const res = await fetch(`${WORKER_URL}/room/${roomId}/time`).catch(() => null);
+    if (res?.ok) {
+      addSample((await res.json()).serverTime, t0);
+      requestState.lastRequestTime = Date.now();
     }
     if (i < 5) await new Promise(r => setTimeout(r, 30));
   }
   if (DEBUG_SYNC) _dbg.event('preSync', `end offset=${offset.toFixed(1)}ms`);
-  } finally {
-    _preSyncDone = true;
-    clearTimeout(_preSyncTimeout);
-  }
 }
 
 // Поточна позиція відтворення в секундах
@@ -1067,12 +1047,13 @@ function buildSongList() {
 function selectSong(song) {
   if (song === currentSong) return;
   currentSong = song;
-  clearBuffer(); // cancels in-flight load via AbortController
   highlightSong(song, false);
   loadLyrics(song);
   if (role === 'host') {
     if (!playing) { playBtn.hidden = false; }
-    ensureBuffer(song).then(() => {}).catch(() => {});
+    // FIX: скидаємо буфер і завантажуємо нову пісню
+    clearBuffer();
+    ensureBuffer(song).then(() => {}).catch(console.error);
   }
 }
 
@@ -1133,7 +1114,7 @@ function getClientId() {
 // Boot
 // =============================================================================
 // Apply volume to gainNode and update slider UI
-function applyVolume(vol, save = false) {
+function applyVolume(vol) {
   globalVolume = Math.max(0, Math.min(1, vol));
   if (gainNode && !isMuted) gainNode.gain.value = globalVolume;
   const slider = document.getElementById('volume-slider');
@@ -1143,8 +1124,6 @@ function applyVolume(vol, save = false) {
     slider.style.setProperty('--vol', slider.value + '%');
   }
   if (label) label.textContent = Math.round(globalVolume * 100) + '%';
-  // Save to localStorage when host explicitly sets volume
-  if (save) localStorage.setItem('karaoke_volume', String(globalVolume));
 }
 
 // Volume slider — host only
@@ -1153,20 +1132,15 @@ function applyVolume(vol, save = false) {
   if (!slider) return;
   // Init gradient
   slider.style.setProperty('--vol', slider.value + '%');
-  let _volDebounce = null;
   slider.addEventListener('input', () => {
     const vol = parseInt(slider.value) / 100;
     slider.style.setProperty('--vol', slider.value + '%');
     document.getElementById('volume-label').textContent = slider.value + '%';
-    // Apply locally immediately so host hears changes in real time
-    applyVolume(vol, true); // save=true — persist to localStorage
-    // Send to clients only after user stops moving slider (debounce 300ms)
-    clearTimeout(_volDebounce);
-    _volDebounce = setTimeout(() => {
-      if (ws && ws.readyState === WebSocket.OPEN && role === 'host') {
-        ws.send(JSON.stringify({ type: 'set_volume', volume: vol }));
-      }
-    }, 300);
+    applyVolume(vol);
+    // Send to all clients via WebSocket
+    if (ws && ws.readyState === WebSocket.OPEN && role === 'host') {
+      ws.send(JSON.stringify({ type: 'set_volume', volume: vol }));
+    }
   });
 })();
 
@@ -1203,16 +1177,6 @@ window.addEventListener('beforeunload', () => {
 });
 
 // =============================================================================
-// Periodic state check — catch missed commands (stop/play/volume) due to bad network
-// =============================================================================
-setInterval(async () => {
-  if (!roomId || !ws || ws.readyState !== WebSocket.OPEN) return;
-  if (role === 'host') return; // host is the source of truth
-  // Ask server for current state — it will resend if we're out of sync
-  ws.send(JSON.stringify({ type: 'state_check' }));
-}, 15000);
-
-// =============================================================================
 // Join / Create
 // =============================================================================
 if (joinBtn) {
@@ -1234,7 +1198,7 @@ createBtn?.addEventListener('click', async () => {
     const { roomId: id } = await res.json();
     localStorage.setItem('karaoke_host_room', id);
     history.pushState(null, '', '/room/' + id);
-    unlockAudio(); // повне розблокування iOS AudioContext через user gesture
+    initAudio(); audioUnlocked = true;
     await enterRoom(id);
   } catch (err) {
     createBtn.disabled = false; createBtn.textContent = '🎵 Створити кімнату';
@@ -1274,11 +1238,6 @@ function connectWS(id) {
 
   ws.addEventListener('close', () => {
     setStatus('Перепідключення…');
-    // Stop audio immediately when connection drops — server will resend play if needed
-    if (playing && !paused && role !== 'host') {
-      stopNode();
-      stopAdaptiveSyncLoop();
-    }
     setTimeout(() => connectWS(id), 2000);
   });
 }
@@ -1298,15 +1257,6 @@ async function handleMsg(msg) {
         // Show volume slider for host
         const volRow = document.getElementById('volume-row');
         if (volRow) volRow.hidden = false;
-        // Restore saved volume from localStorage
-        const savedVol = localStorage.getItem('karaoke_volume');
-        if (savedVol !== null) {
-          applyVolume(parseFloat(savedVol));
-          // Send to server so clients get correct volume
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'set_volume', volume: globalVolume }));
-          }
-        }
         if (DEBUG_SYNC) {
           _dbg.setLabel('host');
           _dbg.event('role', 'host — debug panel');
@@ -1349,7 +1299,7 @@ async function handleMsg(msg) {
         lyricsCont.hidden = true;
         syncAudioEnabled = msg.syncAudio || false;
         setHeaderToggle(syncAudioEnabled);
-        if (msg.volume !== undefined && msg.role !== 'host') applyVolume(msg.volume);
+        if (msg.volume !== undefined) applyVolume(msg.volume);
         setStatus('Очікування хоста…');
       }
       break;
@@ -1360,9 +1310,7 @@ async function handleMsg(msg) {
 
     // ── Debug log from client ─────────────────────────────────────────────────
     case 'set_volume': {
-      // Host is source of truth — ignore incoming set_volume on host side
-      // (avoids feedback loop where finalizeJoin sends volume back to host)
-      if (role !== 'host') applyVolume(msg.volume ?? 0.8);
+      applyVolume(msg.volume ?? 0.8);
       break;
     }
 
@@ -1380,37 +1328,24 @@ async function handleMsg(msg) {
     // щоб клієнт точно знав яку пісню грати
     case 'play': {
       const incomingSong = msg.song;
-      if (msg.volume !== undefined && role !== 'host') applyVolume(msg.volume);
+      startTime          = msg.startTime;
+      paused             = false;
+      syncAudioEnabled   = msg.syncAudio || false;
 
-      // If song changed — reset buffer and lyrics
+      // FIX: якщо пісня змінилась — скидаємо буфер, завантажуємо нову
       if (incomingSong !== currentSong) {
-        stopNode(); clearBuffer();
+        stopNode();
+        clearBuffer();
         currentSong = incomingSong;
         await loadLyrics(incomingSong);
       }
 
-      if (msg.alreadyPaused) {
-        // Reconnecting while paused
-        startTime = msg.startTime;
-        playing = true; paused = true;
-        startAnim();
-        if (role === 'host') pauseBtn.textContent = '▶ Продовжити';
-        else setStatus('Хост поставив на паузу…');
-      } else if (role === 'host' && playing) {
-        // Host already started locally — just sync startTime from server
-        startTime = msg.startTime;
-      } else if (!playing) {
-        // Client (or host before local start) — start normally
-        startTime = msg.startTime;
-        paused = false;
-        await doPlay(incomingSong);
-      }
+      await doPlay(incomingSong);
       break;
     }
 
     // ── Pause ────────────────────────────────────────────────────────────────
     case 'pause': {
-      if (!playing) break; // ignore stale pause if not playing
       paused = true;
       stopAdaptiveSyncLoop();
       stopNode();
@@ -1422,17 +1357,18 @@ async function handleMsg(msg) {
 
     // ── Resume ───────────────────────────────────────────────────────────────
     case 'resume': {
-      if (!playing) break;
+      startTime        = msg.startTime;
+      paused           = false;
       syncAudioEnabled = msg.syncAudio || false;
       startAnim(); startScroll(); requestWakeLock();
       setStatus('');
+      if (role === 'host') { pauseBtn.textContent = '⏸ Пауза'; }
       if (role === 'host') {
-        pauseBtn.textContent = '⏸ Пауза';
-        // Host already resumed locally in pauseBtn — just update startTime
-        startTime = msg.startTime;
+        // Host already did preSync before sending resume — just schedule
+        scheduleAudio();
+        startAdaptiveSyncLoop();
       } else if (syncAudioEnabled && audioUnlocked && audioBuffer && !isMuted) {
-        paused = false;
-        startTime = msg.startTime;
+        // Clients sync offset fresh, parallel pattern like initial play
         await preSync();
         scheduleAudio();
         startAdaptiveSyncLoop();
@@ -1445,8 +1381,10 @@ async function handleMsg(msg) {
       playing = false; paused = false; startTime = null;
       stopAdaptiveSyncLoop();
       stopNode();
+      if (gainNode) { gainNode.gain.setValueAtTime(0, audioCtx?.currentTime || 0); }
       releaseWakeLock();
       stopAnim(); stopScroll(); clearHL(); resetScroll();
+      setTimeout(() => { if (gainNode) gainNode.gain.setValueAtTime(isMuted ? 0 : 1, audioCtx?.currentTime || 0); }, 100);
       if (role === 'host') {
         playBtn.hidden = false;
         playBtn.textContent = '▶ Грати'; pauseBtn.hidden = true;
@@ -1476,9 +1414,7 @@ async function handleMsg(msg) {
         }
 
         if (!isMuted && audioUnlocked && currentSong) {
-          // Only preload buffer if we're already playing — otherwise wait for play command
-          // Preloading during idle can cause wrong-song bugs when host switches songs
-          if (!audioBuffer && playing && startTime !== null) {
+          if (!audioBuffer) {
             setStatus('⏳ Завантаження…');
             try {
               await ensureBuffer(currentSong);
@@ -1548,10 +1484,8 @@ async function doPlay(song) {
   resetScroll(); setStatus(''); startAnim(); startScroll();
 
   if (role === 'host') {
-    // Ensure AudioContext is running before scheduling
-    if (audioCtx && audioCtx.state !== 'running') {
-      try { await audioCtx.resume(); } catch {}
-    }
+    // preSync already done in playBtn handler before ws.send('play')
+    // Doing it again here adds 120ms delay and causes host to start late
     scheduleAudio();
     startAdaptiveSyncLoop();
 
@@ -1561,9 +1495,9 @@ async function doPlay(song) {
       clearBuffer();
       setStatus('⏳ Завантаження…');
       try {
-        // Load buffer and sync offset in parallel
+        // Load buffer and sync offset in parallel — offset stays fresh
+        // regardless of how long the MP3 takes to load
         await Promise.all([ensureBuffer(song), preSync()]);
-        if (!audioBuffer) { stopNode(); return; }
         setStatus('');
       } catch (e) {
         stopNode(); clearBuffer();
@@ -1583,85 +1517,44 @@ async function doPlay(song) {
 // =============================================================================
 playBtn?.addEventListener('click', async () => {
   if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host') return;
-
   if (playing) {
-    // STOP — apply locally, broadcast to clients
-    playing = false; paused = false; startTime = null;
-    stopAdaptiveSyncLoop(); stopNode(); releaseWakeLock();
-    stopAnim(); stopScroll(); clearHL(); resetScroll();
-    playBtn.textContent = '▶ Грати'; pauseBtn.hidden = true;
-    highlightSong(currentSong, false);
-    setStatus('Зупинено. Виберіть пісню та натисніть «Грати».');
-    try { ws.send(JSON.stringify({ type: 'stop' })); } catch {}
+    ws.send(JSON.stringify({ type: 'stop' }));
     return;
   }
-
-  // PLAY
-  unlockAudio();
+  // Спочатку завантажуємо буфер — тільки після успіху надсилаємо play
+  // Якщо відправити play до завантаження — всі учасники отримають команду,
+  // але хост може зламатись при завантаженні і десинхронізуватись
   const song = currentSong || songs[0] || 'test';
-
-  // Ensure buffer loaded — retry up to 5 times
   if (!audioBuffer || currentSong !== song) {
     setStatus('⏳ Завантаження…');
     playBtn.disabled = true;
-    for (let attempt = 1; attempt <= 5; attempt++) {
-      try {
-        await ensureBuffer(song);
-        break;
-      } catch (e) {
-        if (attempt === 5) {
-          playBtn.disabled = false;
-          setStatus('⚠ Не вдалось завантажити.');
-          return;
-        }
-        setStatus(`⏳ Завантаження… (спроба ${attempt}/5)`);
-        await new Promise(r => setTimeout(r, 1500));
-      }
+    try {
+      await ensureBuffer(song);
+      setStatus('');
+    } catch (e) {
+      playBtn.disabled = false;
+      setStatus('⚠ ' + e.message + ' — натисніть «Грати» ще раз');
+      return;
     }
-    setStatus('');
     playBtn.disabled = false;
   }
-
-  if (playing) return; // guard double-tap
-
+  // preSync тут — щоб offset був свіжим ДО відправки команди
+  // Хост і клієнт матимуть менший розрив між своїми serverNow() в момент scheduleAudio()
   await preSync();
-
-  if (playing) return; // guard again after async
-
-  // Mark playing immediately so incoming broadcast doesn't trigger second doPlay
-  playing   = true;
-  startTime = serverNow() + 3000;
-
-  try { ws.send(JSON.stringify({ type: 'play', song })); } catch {}
-  await doPlay(song);
+  ws.send(JSON.stringify({ type: 'play', song }));
 });
-
 
 pauseBtn?.addEventListener('click', async () => {
   if (!ws || ws.readyState !== WebSocket.OPEN || role !== 'host' || !playing) return;
-
   if (paused) {
-    // RESUME
-    paused = false;
-    pauseBtn.textContent = '⏸ Пауза';
-    setStatus('');
-    startAnim(); startScroll(); requestWakeLock();
+    // Pre-sync offset before resume — same pattern as initial play
+    // This ensures host's offset is fresh when scheduleAudio runs
     await preSync();
-    startTime = serverNow() + 2000;
-    try { ws.send(JSON.stringify({ type: 'resume', song: currentSong })); } catch {}
-    scheduleAudio();
-    startAdaptiveSyncLoop();
+    ws.send(JSON.stringify({ type: 'resume', song: currentSong }));
   } else {
-    // PAUSE
-    paused = true;
-    pauseBtn.textContent = '▶ Продовжити';
-    setStatus('Пауза.');
-    stopAdaptiveSyncLoop(); stopNode();
-    stopAnim(); stopScroll();
-    try { ws.send(JSON.stringify({ type: 'pause', song: currentSong })); } catch {}
+    ws.send(JSON.stringify({ type: 'pause', song: currentSong }));
   }
 });
-
 
 syncCheck?.addEventListener('change', () => {
   syncLabel.classList.toggle('on', syncCheck.checked);
