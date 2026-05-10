@@ -157,8 +157,7 @@ export class KaraokeRoom {
     session.ws.send(JSON.stringify({
       type: 'joined', role: session.role,
       clientId: session.clientId, serverTime: Date.now(),
-      syncAudio: this.syncAudio,
-      volume: this.volume ?? 0.8,
+      syncAudio: this.syncAudio,  // передаємо поточний стан одразу
     }));
     if (this.playing && !this.paused && this.startTime !== null) {
       session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio }));
@@ -186,7 +185,7 @@ export class KaraokeRoom {
         await this.state.storage.put('paused',    false);
         await this.state.storage.put('startTime', this.startTime);
         await this.state.storage.put('song',      this.song);
-        this.broadcast({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio, volume: this.volume ?? 0.8 });
+        this.broadcast({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio });
         break;
 
       case 'pause':
@@ -225,26 +224,8 @@ export class KaraokeRoom {
         await this.state.storage.put('syncAudio', msg.enabled);
         for (const s of this.sessions) {
           if (s.role !== 'host') {
+            // FIX: передаємо song щоб клієнти знали яку пісню завантажувати
             try { s.ws.send(JSON.stringify({ type: 'sync_audio', enabled: msg.enabled, song: this.song })); } catch {}
-          }
-        }
-        break;
-
-      case 'set_volume':
-        if (session.role !== 'host') return;
-        this.volume = Math.max(0, Math.min(1, msg.volume ?? 0.8));
-        // Broadcast to all including host so UI stays in sync
-        this.broadcast({ type: 'set_volume', volume: this.volume });
-        break;
-
-      case 'debug_log':
-        // Debug logging support — used when DEBUG_SYNC=true in app.js
-        // Forwards client sync logs to host so all devices' logs appear in one panel.
-        // Safe to leave here: when DEBUG_SYNC=false, clients never send debug_log messages.
-        if (session.role === 'host') return;
-        for (const s of this.sessions) {
-          if (s.role === 'host') {
-            try { s.ws.send(JSON.stringify(msg)); } catch {}
           }
         }
         break;
