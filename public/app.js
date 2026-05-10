@@ -257,13 +257,22 @@ function cancelCorrections() {
 // Wake Lock
 // =============================================================================
 async function requestWakeLock() {
-  if ('wakeLock' in navigator) {
-    try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
-  }
+  if (!('wakeLock' in navigator)) return;
+  // Не запитуємо повторно якщо вже активний
+  if (wakeLock && !wakeLock.released) return;
+  try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
 }
-function releaseWakeLock() { if (wakeLock) { wakeLock.release(); wakeLock = null; } }
+function releaseWakeLock() {
+  // Хост тримає wake lock постійно — не відпускаємо під час сесії
+  if (role === 'host') return;
+  if (wakeLock) { wakeLock.release(); wakeLock = null; }
+}
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && playing && !paused) requestWakeLock();
+  // Браузер скасовує wake lock при переході вкладки у фон —
+  // відновлюємо як тільки вкладка знову стає активною.
+  // Для хоста — завжди; для клієнта — тільки під час відтворення.
+  if (document.visibilityState !== 'visible') return;
+  if (role === 'host' || (playing && !paused)) requestWakeLock();
 });
 
 // =============================================================================
@@ -507,6 +516,7 @@ async function handleMsg(msg) {
         syncAudioEnabled = saved;
         if (saved) ws.send(JSON.stringify({ type: 'sync_audio', enabled: true }));
         setStatus('Виберіть пісню зі списку нижче.');
+        requestWakeLock(); // хост: тримаємо екран активним увесь час сесії
 
       } else {
         // Клієнт
