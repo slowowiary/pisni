@@ -165,20 +165,45 @@
     #sync-audio-label.on { border-color: #3f51b5; background: #e8eaf6; color: #3f51b5; font-weight: 600; }
     #sync-audio-label input { accent-color: #3f51b5; width: 1rem; height: 1rem; cursor: pointer; }
 
+    /* Volume control */
+    #volume-row {
+      display: flex; align-items: center; gap: .8rem;
+      width: 100%; max-width: 340px;
+      padding: .5rem .8rem;
+      background: #fff; border: 1px solid #c5cae9; border-radius: 8px;
+      font-size: .85rem; color: #555;
+    }
+    #volume-row span { white-space: nowrap; min-width: 2.2rem; text-align: right; font-size: .8rem; color: #888; }
+    #volume-slider {
+      flex: 1; -webkit-appearance: none; appearance: none;
+      height: 4px; border-radius: 2px;
+      background: linear-gradient(to right, #3f51b5 var(--vol, 80%), #dde3ff var(--vol, 80%));
+      outline: none; cursor: pointer;
+    }
+    #volume-slider::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 18px; height: 18px;
+      border-radius: 50%; background: #3f51b5;
+      box-shadow: 0 1px 4px rgba(63,81,181,.4); cursor: pointer;
+    }
+    #volume-slider::-moz-range-thumb {
+      width: 18px; height: 18px; border: none;
+      border-radius: 50%; background: #3f51b5; cursor: pointer;
+    }
+
     /* ── Блок субтитрів ─────────────────────────────────────── */
     #lyrics-container {
       width: 100%; max-width: 720px;
-      height: 320px;
+      height: 420px;
       overflow: hidden;
       position: relative;
       background: #fff;
       border: 1px solid #dde3ff;
       border-radius: 12px;
-      padding: 1.2rem 1.8rem;
+      padding: 2.8rem 1.8rem;
     }
     #lyrics-container::before,
     #lyrics-container::after {
-      content: ''; position: absolute; left: 0; right: 0; height: 48px;
+      content: ''; position: absolute; left: 0; right: 0; height: 72px;
       pointer-events: none; z-index: 2;
     }
     #lyrics-container::before { top: 0;    background: linear-gradient(#fff, transparent); }
@@ -189,11 +214,35 @@
       line-height: 2.3;
       text-align: center;
       will-change: transform;
+      /* GPU layer for smooth scroll on older Android */
+      transform: translateZ(0);
+      backface-visibility: hidden;
+
     }
-    .word { display: inline-block; color: #999; transition: color .08s; font-weight: 400; }
+    .word {
+      display: inline-block;
+      color: #333;
+      font-weight: 400;
+      padding: 0 2px;
+      position: relative;
+      text-shadow: none;
+      transition: color 0.6s ease, text-shadow 0.6s ease;
+    }
     .word::before { content: attr(data-word); display: block; font-weight: 700; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
-    .word.done   { color: #666; }
-    .word.active { color: #e91e63; text-shadow: 0 0 0.4px #e91e63, 0 0 0.4px #e91e63; }
+    .word.done { color: #333; }
+    .word.pre-active {
+      color: #7a0000;
+      text-shadow:
+        0 6px 18px rgba(255, 200, 0, 0.40),
+        0 10px 35px rgba(255, 200, 0, 0.20);
+    }
+    .word.active {
+      color: #cc0000;
+      text-shadow:
+        0 6px 20px rgba(255, 200, 0, 0.70),
+        0 10px 40px rgba(255, 200, 0, 0.40),
+        0 16px 60px rgba(255, 200, 0, 0.20);
+    }
 
     /* ── Список пісень ──────────────────────────────────────── */
     #song-picker {
@@ -237,22 +286,22 @@
       display: inline-flex;
       align-items: center;
       gap: .5rem;
-      background: linear-gradient(135deg, #e91e63, #c2185b);
-      color: #fff;
-      border: none;
+      background: transparent;
+      color: #222;
+      border: 1.5px solid #aaa;
       padding: .8rem 2rem;
       font-size: 1rem;
-      font-weight: 700;
+      font-weight: 600;
       border-radius: 30px;
       cursor: pointer;
       margin: 1rem auto;
-      box-shadow: 0 4px 14px rgba(233,30,99,.35);
-      transition: transform .15s, box-shadow .15s;
+      box-shadow: none;
+      transition: border-color .15s, box-shadow .15s;
     }
+    #donate-btn .heart { color: #e91e63; }
     #donate-btn:hover {
-      background: linear-gradient(135deg, #c2185b, #ad1457);
-      transform: translateY(-2px);
-      box-shadow: 0 6px 20px rgba(233,30,99,.45);
+      border-color: #666;
+      box-shadow: 0 2px 8px rgba(0,0,0,.10);
     }
 
     /* ── Модальне вікно ─────────────────────────────────────── */
@@ -379,6 +428,13 @@
         <button id="pause-btn" hidden>⏸ Пауза</button>
       </div>
 
+      <!-- Volume control — visible to all, controlled by host -->
+      <div id="volume-row" hidden>
+        <span>🔊</span>
+        <input id="volume-slider" type="range" min="0" max="100" value="80">
+        <span id="volume-label">80%</span>
+      </div>
+
 
 
       <div id="lyrics-container" hidden>
@@ -399,7 +455,7 @@
 
 <!-- Кнопка пожертвування -->
 <div style="text-align:center; padding: 0 1rem 1.2rem;">
-  <button id="donate-btn">❤️ Пожертвування</button>
+  <button id="donate-btn"><span class="heart">❤</span> Пожертвування</button>
 </div>
 
 <!-- Модальне вікно пожертвування -->
@@ -463,6 +519,15 @@ document.addEventListener('click', () => {
   if (v && v.paused) v.play().catch(() => {});
 }, { once: true });
 </script>
+
+  <!-- NoSleep: запобігає гасінню екрана на iOS -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/nosleep.js/0.12.0/NoSleep.min.js"></script>
+  <script>
+    const _noSleep = new NoSleep();
+    document.addEventListener('click', () => {
+      _noSleep.enable().catch(() => {});
+    }, { once: true });
+  </script>
 
   <!-- QR-код: бібліотека без бекенду -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
