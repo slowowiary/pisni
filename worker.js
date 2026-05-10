@@ -109,7 +109,7 @@ export class KaraokeRoom {
         await this.state.storage.put('paused', false);
         await this.state.storage.delete('startTime');
         await this.state.storage.delete('pauseTime');
-        this.broadcast({ type: 'stop' });
+        this.broadcastRetry({ type: 'stop', sessionId: Date.now() }, true);
       }
       return cors(json({ ok: true }));
     }
@@ -157,16 +157,27 @@ export class KaraokeRoom {
     session.ws.send(JSON.stringify({
       type: 'joined', role: session.role,
       clientId: session.clientId, serverTime: Date.now(),
-      syncAudio: this.syncAudio,  // передаємо поточний стан одразу
+      syncAudio: this.syncAudio,
+      volume: this.volume ?? 0.8,
     }));
     if (this.playing && !this.paused && this.startTime !== null) {
       session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio }));
     } else if (this.playing && this.paused) {
-      session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio }));
-      session.ws.send(JSON.stringify({ type: 'pause', pauseTime: this.pauseTime }));
+      // Send play+paused atomically in one message to avoid client starting audio
+      session.ws.send(JSON.stringify({
+        type: 'play', startTime: this.startTime, song: this.song,
+        syncAudio: this.syncAudio, alreadyPaused: true, pauseTime: this.pauseTime
+      }));
     }
     if (!this.playing && this.syncAudio) {
       session.ws.send(JSON.stringify({ type: 'sync_audio', enabled: true, song: this.song }));
+    }
+    // Always send current volume so reconnecting client gets correct level
+    session.ws.send(JSON.stringify({ type: 'set_volume', volume: this.volume ?? 0.8 }));
+    // If nothing is playing, explicitly tell client to stop
+    // (handles case where client missed a stop command due to network issues)
+    if (!this.playing) {
+      session.ws.send(JSON.stringify({ type: 'stop' }));
     }
   }
 
@@ -185,7 +196,7 @@ export class KaraokeRoom {
         await this.state.storage.put('paused',    false);
         await this.state.storage.put('startTime', this.startTime);
         await this.state.storage.put('song',      this.song);
-        this.broadcast({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio });
+        this.broadcast({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio, volume: this.volume ?? 0.8 });
         break;
 
       case 'pause':
@@ -215,7 +226,7 @@ export class KaraokeRoom {
         await this.state.storage.put('paused',  false);
         await this.state.storage.delete('startTime');
         await this.state.storage.delete('pauseTime');
-        this.broadcast({ type: 'stop' });
+        this.broadcastRetry({ type: 'stop', sessionId: Date.now() }, true);
         break;
 
       case 'sync_audio':
@@ -224,8 +235,24 @@ export class KaraokeRoom {
         await this.state.storage.put('syncAudio', msg.enabled);
         for (const s of this.sessions) {
           if (s.role !== 'host') {
-            // FIX: передаємо song щоб клієнти знали яку пісню завантажувати
             try { s.ws.send(JSON.stringify({ type: 'sync_audio', enabled: msg.enabled, song: this.song })); } catch {}
+          }
+        }
+        break;
+
+      case 'set_volume':
+        if (session.role !== 'host') return;
+        this.volume = Math.max(0, Math.min(1, msg.volume ?? 0.8));
+        // Broadcast to all including host so UI stays in sync
+        this.broadcast({ type: 'set_volume', volume: this.volume });
+        break;
+
+      case 'debug_log':
+        // Debug logging support — used when DEBUG_SYNC=true in app.js
+        if (session.role === 'host') return;
+        for (const s of this.sessions) {
+          if (s.role === 'host') {
+            try { s.ws.send(JSON.stringify(msg)); } catch {}
           }
         }
         break;
@@ -234,11 +261,33 @@ export class KaraokeRoom {
 
   onClose(session) {
     this.sessions = this.sessions.filter(s => s !== session);
+    // If host disconnected — stop playback for everyone
+    if (session.role === 'host' && this.playing) {
+      this.playing = false; this.paused = false;
+      this.startTime = null; this.pauseTime = null;
+      this.state.storage.put('playing', false);
+      this.state.storage.put('paused', false);
+      this.state.storage.delete('startTime');
+      this.state.storage.delete('pauseTime');
+      this.broadcastRetry({ type: 'stop', sessionId: Date.now() }, true);
+    }
   }
 
-  broadcast(msg) {
+  broadcast(msg, skipHost = false) {
     const raw = JSON.stringify(msg);
-    for (const s of this.sessions) { try { s.ws.send(raw); } catch {} }
+    for (const s of this.sessions) {
+      if (skipHost && s.role === 'host') continue;
+      try { s.ws.send(raw); } catch {}
+    }
+  }
+
+  // Broadcast with retry — for critical commands that must reach all clients.
+  // Sends 3 times: immediately, after 3s, after 7s (total window ~10s).
+  // Harmless if received multiple times — clients handle idempotently.
+  broadcastRetry(msg, skipHost = false) {
+    this.broadcast(msg, skipHost);
+    setTimeout(() => this.broadcast(msg, skipHost), 3000);
+    setTimeout(() => this.broadcast(msg, skipHost), 7000);
   }
 }
 
