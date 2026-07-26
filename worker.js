@@ -72,6 +72,7 @@ export class KaraokeRoom {
     this.song         = null;
     this.hostClientId = null;
     this.syncAudio    = false;
+    this.noWords      = false; // false = зі словами (файл "<song>1"), true = акапело (файл "<song>")
     this.ready        = false;
   }
 
@@ -84,6 +85,7 @@ export class KaraokeRoom {
     this.song         = (await this.state.storage.get('song'))         ?? null;
     this.hostClientId = (await this.state.storage.get('hostClientId')) ?? null;
     this.syncAudio    = (await this.state.storage.get('syncAudio'))    ?? false;
+    this.noWords      = (await this.state.storage.get('noWords'))      ?? false;
     this.ready        = true;
   }
 
@@ -161,13 +163,13 @@ export class KaraokeRoom {
       volume: this.volume ?? 0.8,
     }));
     if (this.playing && !this.paused && this.startTime !== null) {
-      session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio }));
+      session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio, noWords: this.noWords }));
     } else if (this.playing && this.paused) {
-      session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio }));
+      session.ws.send(JSON.stringify({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio, noWords: this.noWords }));
       session.ws.send(JSON.stringify({ type: 'pause', pauseTime: this.pauseTime }));
     }
     if (!this.playing && this.syncAudio) {
-      session.ws.send(JSON.stringify({ type: 'sync_audio', enabled: true, song: this.song }));
+      session.ws.send(JSON.stringify({ type: 'sync_audio', enabled: true, song: this.song, noWords: this.noWords }));
     }
   }
 
@@ -182,11 +184,13 @@ export class KaraokeRoom {
         this.playing   = true; this.paused = false;
         this.startTime = Date.now() + 3000;
         this.song      = msg.song || 'test';
+        this.noWords   = !!msg.noWords;
         await this.state.storage.put('playing',   true);
         await this.state.storage.put('paused',    false);
         await this.state.storage.put('startTime', this.startTime);
         await this.state.storage.put('song',      this.song);
-        this.broadcast({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio, volume: this.volume ?? 0.8 });
+        await this.state.storage.put('noWords',   this.noWords);
+        this.broadcast({ type: 'play', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio, volume: this.volume ?? 0.8, noWords: this.noWords });
         break;
 
       case 'pause':
@@ -205,7 +209,7 @@ export class KaraokeRoom {
         await this.state.storage.put('paused',    false);
         await this.state.storage.put('startTime', this.startTime);
         await this.state.storage.delete('pauseTime');
-        this.broadcast({ type: 'resume', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio });
+        this.broadcast({ type: 'resume', startTime: this.startTime, song: this.song, syncAudio: this.syncAudio, noWords: this.noWords });
         break;
 
       case 'stop':
@@ -222,10 +226,12 @@ export class KaraokeRoom {
       case 'sync_audio':
         if (session.role !== 'host') return;
         this.syncAudio = msg.enabled;
+        if (msg.noWords !== undefined) this.noWords = !!msg.noWords;
         await this.state.storage.put('syncAudio', msg.enabled);
+        await this.state.storage.put('noWords',   this.noWords);
         for (const s of this.sessions) {
           if (s.role !== 'host') {
-            try { s.ws.send(JSON.stringify({ type: 'sync_audio', enabled: msg.enabled, song: this.song })); } catch {}
+            try { s.ws.send(JSON.stringify({ type: 'sync_audio', enabled: msg.enabled, song: this.song, noWords: this.noWords })); } catch {}
           }
         }
         break;
