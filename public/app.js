@@ -185,9 +185,15 @@ let gainNode       = null;
 let globalVolume   = 0.8; // 0.0 – 1.0, synced from host
 let sourceNode     = null;
 let audioBuffer    = null;   // завантажений буфер ТІЛЬКИ поточної пісні
+let audioBufferMode = null;  // noWordsMode, з якою завантажено поточний audioBuffer
 let loadingSong    = null;   // яка пісня зараз завантажується (щоб не дублювати)
 let audioUnlocked  = false;  // user gesture відбувся
 let isMuted        = false;
+
+// Без слів (акапело)
+// false (за умовчанням) — грає файл "<song>1.mp3" (зі словами)
+// true                   — грає файл "<song>.mp3"  (акапело, без слів)
+let noWordsMode = false;
 
 // Sync
 let syncAudioEnabled = false; // хост увімкнув "грати на всіх"
@@ -214,6 +220,8 @@ const playBtn      = $('play-btn');
 const pauseBtn     = $('pause-btn');
 const syncLabel    = $('sync-audio-label');
 const syncCheck    = $('sync-audio-check');
+const noWordsLabel = $('no-words-label');
+const noWordsCheck = $('no-words-check');
 const headerToggle = $('header-audio-toggle');
 const songPicker   = $('song-picker');
 const songListEl   = $('song-list');
@@ -245,32 +253,44 @@ function unlockAudio() {
   audioUnlocked = true;
 }
 
-// Завантажує MP3. Якщо вже завантажений — повертає кеш.
-// FIX: скидає audioBuffer якщо пісня змінилась
+// Ім'я mp3-файлу для пісні залежно від режиму "без слів":
+// noWordsMode = true  -> "<song>.mp3"  (акапело, поточний файл, без слів)
+// noWordsMode = false -> "<song>1.mp3" (та сама мелодія, зі словами)
+function audioFileName(song) {
+  return noWordsMode ? song : (song + '1');
+}
+
+// Завантажує MP3. Якщо вже завантажений (та сама пісня і той самий режим) — повертає кеш.
+// FIX: скидає audioBuffer якщо пісня або режим (без слів / зі словами) змінились
 async function ensureBuffer(song) {
+  const mode = noWordsMode;
   // Вже є правильний буфер
-  if (audioBuffer && currentSong === song) return audioBuffer;
-  // Якщо буфер від іншої пісні — скидаємо
-  if (audioBuffer && currentSong !== song) audioBuffer = null;
+  if (audioBuffer && currentSong === song && audioBufferMode === mode) return audioBuffer;
+  // Якщо буфер від іншої пісні або іншого режиму — скидаємо
+  if (audioBuffer && (currentSong !== song || audioBufferMode !== mode)) audioBuffer = null;
   initAudio();
   loadingSong = song;
+  const file = audioFileName(song);
   try {
-    const res = await fetch('/songs/' + song + '/' + song + '.mp3');
-    if (!res.ok) throw new Error('MP3 not found: ' + song);
+    const res = await fetch('/songs/' + song + '/' + file + '.mp3');
+    if (!res.ok) throw new Error('MP3 not found: ' + file);
     const arr = await res.arrayBuffer();
     if (loadingSong !== song) throw new Error('Song changed during load');
     audioBuffer = await new Promise((ok, fail) => audioCtx.decodeAudioData(arr, ok, fail));
+    audioBufferMode = mode;
     loadingSong = null;
     return audioBuffer;
   } catch (e) {
     loadingSong = null;
     audioBuffer = null;
+    audioBufferMode = null;
     throw e;
   }
 }
 
 function clearBuffer() {
   audioBuffer = null;
+  audioBufferMode = null;
   loadingSong = null;
 }
 
@@ -1271,7 +1291,12 @@ async function handleMsg(msg) {
         syncCheck.checked = saved;
         syncLabel.classList.toggle('on', saved);
         syncAudioEnabled = saved;
-        if (saved) ws.send(JSON.stringify({ type: 'sync_audio', enabled: true }));
+        // Галочка "Без слів" — завжди знята за умовчанням, не зберігається між сесіями
+        noWordsLabel.hidden = false;
+        noWordsCheck.checked = false;
+        noWordsLabel.classList.remove('on');
+        noWordsMode = false;
+        if (saved) ws.send(JSON.stringify({ type: 'sync_audio', enabled: true, noWords: noWordsMode }));
         setStatus('Виберіть пісню зі списку нижче.');
         requestWakeLock(); // хост: тримаємо екран активним увесь час сесії
 
@@ -1294,6 +1319,7 @@ async function handleMsg(msg) {
         }
         songPicker.hidden = true; playBtn.hidden = true;
         pauseBtn.hidden = true; syncLabel.hidden = true;
+        noWordsLabel.hidden = true;
         lyricsCont.hidden = true;
         syncAudioEnabled = msg.syncAudio || false;
         setHeaderToggle(syncAudioEnabled);
@@ -1329,6 +1355,7 @@ async function handleMsg(msg) {
       startTime          = msg.startTime;
       paused             = false;
       syncAudioEnabled   = msg.syncAudio || false;
+      noWordsMode        = !!msg.noWords;
 
       // FIX: якщо пісня змінилась — скидаємо буфер, завантажуємо нову
       if (incomingSong !== currentSong) {
@@ -1404,6 +1431,7 @@ async function handleMsg(msg) {
 
       if (msg.enabled) {
         setHeaderToggle(true);
+        noWordsMode = !!msg.noWords;
         // Оновлюємо currentSong якщо worker передав нову пісню
         if (msg.song && msg.song !== currentSong) {
           currentSong = msg.song;
@@ -1412,7 +1440,7 @@ async function handleMsg(msg) {
         }
 
         if (!isMuted && audioUnlocked && currentSong) {
-          if (!audioBuffer) {
+          if (!audioBuffer || audioBufferMode !== noWordsMode) {
             setStatus('⏳ Завантаження…');
             try {
               await ensureBuffer(currentSong);
@@ -1440,6 +1468,9 @@ async function handleMsg(msg) {
       role = 'host';
       buildSongList(); songPicker.hidden = false;
       playBtn.hidden = !currentSong; syncLabel.hidden = false;
+      noWordsLabel.hidden = false;
+      noWordsCheck.checked = noWordsMode;
+      noWordsLabel.classList.toggle('on', noWordsMode);
       setHeaderToggle(false);
       setStatus('Ви тепер хост.');
       break;
@@ -1488,7 +1519,7 @@ async function doPlay(song) {
     startAdaptiveSyncLoop();
 
   } else if (syncAudioEnabled && audioUnlocked && !isMuted) {
-    if (!audioBuffer || currentSong !== song) {
+    if (!audioBuffer || currentSong !== song || audioBufferMode !== noWordsMode) {
       stopNode();
       clearBuffer();
       setStatus('⏳ Завантаження…');
@@ -1523,7 +1554,7 @@ playBtn?.addEventListener('click', async () => {
   // Якщо відправити play до завантаження — всі учасники отримають команду,
   // але хост може зламатись при завантаженні і десинхронізуватись
   const song = currentSong || songs[0] || 'test';
-  if (!audioBuffer || currentSong !== song) {
+  if (!audioBuffer || currentSong !== song || audioBufferMode !== noWordsMode) {
     setStatus('⏳ Завантаження…');
     playBtn.disabled = true;
     try {
@@ -1539,7 +1570,7 @@ playBtn?.addEventListener('click', async () => {
   // preSync тут — щоб offset був свіжим ДО відправки команди
   // Хост і клієнт матимуть менший розрив між своїми serverNow() в момент scheduleAudio()
   await preSync();
-  ws.send(JSON.stringify({ type: 'play', song }));
+  ws.send(JSON.stringify({ type: 'play', song, noWords: noWordsMode }));
 });
 
 pauseBtn?.addEventListener('click', async () => {
@@ -1560,7 +1591,22 @@ syncCheck?.addEventListener('change', () => {
   if (role === 'host' && ws?.readyState === WebSocket.OPEN) {
     localStorage.setItem('karaoke_sync_audio', syncCheck.checked ? '1' : '0');
     // FIX: передаємо також currentSong щоб клієнти знали яку пісню завантажувати
-    ws.send(JSON.stringify({ type: 'sync_audio', enabled: syncCheck.checked, song: currentSong }));
+    ws.send(JSON.stringify({ type: 'sync_audio', enabled: syncCheck.checked, song: currentSong, noWords: noWordsMode }));
+  }
+});
+
+// Галочка "Без слів" (акапело) — хост.
+// За умовчанням завжди вимкнена (не зберігається між сесіями).
+// Вимкнена  -> грає файл "<song>1.mp3" (зі словами)
+// Увімкнена -> грає файл "<song>.mp3"  (акапело, без слів)
+noWordsCheck?.addEventListener('change', () => {
+  noWordsLabel.classList.toggle('on', noWordsCheck.checked);
+  noWordsMode = noWordsCheck.checked;
+  // Поточний буфер більше не відповідає режиму — скидаємо і перезавантажуємо
+  // заздалегідь для обраної пісні, щоб наступний "Грати" був миттєвим.
+  clearBuffer();
+  if (role === 'host' && currentSong) {
+    ensureBuffer(currentSong).catch(() => {});
   }
 });
 
